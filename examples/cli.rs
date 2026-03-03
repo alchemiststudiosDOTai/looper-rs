@@ -1,10 +1,11 @@
-use std::{error::Error, io::{self, Write}, sync::Arc};
+use std::{error::Error, io::{self, Write}, sync::Arc, time::Duration};
 
-use console::Term;
-use indicatif::ProgressBar;
+use console::{Style, Term};
+use indicatif::{ProgressBar, ProgressStyle};
 use tokio::sync::{Notify, mpsc};
 
-use loopin_rs::{looper::Looper, theme::Theme, types::LooperToInterfaceMessage};
+use loopin_rs::{looper::Looper, types::LooperToInterfaceMessage};
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -63,5 +64,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         looper.send(&input).await?;
         turn_done.notified().await;
+    }
+}
+
+struct Theme {
+    thinking: Style,
+    separator: Style,
+    tool_spinner: Style,
+    prompt: Style,
+    greeting: Style,
+}
+
+impl Theme {
+    fn default() -> Self {
+        Theme {
+            thinking: Style::new().green().dim().italic(),
+            separator: Style::new().green().dim(),
+            tool_spinner: Style::new().yellow(),
+            prompt: Style::new().green().bold(),
+            greeting: Style::new().green().bold(),
+        }
+    }
+
+    fn greeting(&self) -> String {
+        format!("{}\n", self.greeting.apply_to("\u{1F980} Welcome to Looper.rs"))
+    }
+
+    fn prompt(&self) -> String {
+        self.prompt.apply_to("> ").to_string()
+    }
+
+    fn separator_line(&self) -> String {
+        self.separator.apply_to("────────────────────────────────").to_string()
+    }
+
+    fn tool_spinner(&self, name: &str) -> ProgressBar {
+        let sp = ProgressBar::new_spinner();
+        sp.set_style(
+            ProgressStyle::default_spinner()
+                .tick_strings(&["▖", "▘", "▝", "▗", "▚", "▞", ""])
+        );
+        sp.set_message(self.tool_spinner.apply_to(name).to_string());
+        sp.enable_steady_tick(Duration::from_millis(80));
+        sp
+    }
+
+    fn thinking_spinner(&self) -> ProgressBar {
+        let sp = ProgressBar::new_spinner();
+        sp.set_style(
+            ProgressStyle::default_spinner()
+                .tick_strings(&["·  ", "·· ", "···", " ··", "  ·", "   "])
+                .template("{spinner} thinking")
+                .unwrap()
+        );
+        sp.enable_steady_tick(Duration::from_millis(200));
+        sp
     }
 }
