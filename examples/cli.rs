@@ -4,14 +4,7 @@ use console::Term;
 use indicatif::ProgressBar;
 use tokio::sync::{Notify, mpsc};
 
-use crate::{looper::Looper, theme::Theme, types::LooperToInterfaceMessage};
-
-mod looper;
-mod mapping;
-mod services;
-mod theme;
-mod tools;
-mod types;
+use loopin_rs::{looper::Looper, theme::Theme, types::LooperToInterfaceMessage};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

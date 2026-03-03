@@ -63,6 +63,8 @@ cp .env.example .env
 
 ## Usage
 
+To run the included CLI example:
+
 ```sh
-cargo run
+cargo run --example cli
 ```
