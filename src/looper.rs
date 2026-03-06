@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    services::{openai_completions::OpenAIChatHandler, openai_responses::OpenAIResponsesHandler, ChatHandler},
+    services::{ChatHandler, anthropic::AnthropicHandler, openai_completions::OpenAIChatHandler, openai_responses::OpenAIResponsesHandler},
     tools::LooperTools,
     types::{HandlerToLooperMessage, Handlers, LooperToHandlerToolCallResult, LooperToInterfaceMessage},
 };
@@ -44,6 +44,12 @@ impl Looper {
             },
             Handlers::OpenAICompletions => {
                 Box::new(OpenAIChatHandler::new(
+                    handler_looper_sender,
+                    &system_message,
+                )?)
+            },
+            Handlers::Anthropic => {
+                Box::new(AnthropicHandler::new(
                     handler_looper_sender,
                     &system_message,
                 )?)
@@ -119,10 +125,10 @@ impl Looper {
     }
 }
 
-// fn get_system_message() -> String {
-//     format!("You think deeply about everything before replying.")
-// }
-
 fn get_system_message() -> String {
-    include_str!("../prompts/system_prompt.txt").to_string()
+    format!("You are friendly and helpful.")
 }
+
+// fn get_system_message() -> String {
+//     include_str!("../prompts/system_prompt.txt").to_string()
+// }

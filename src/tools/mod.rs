@@ -38,7 +38,7 @@ impl LooperTools {
         tools.insert("list_directory".to_string(), Box::new(ListDirectoryTool));
         tools.insert("grep".to_string(), Box::new(GrepTool));
         tools.insert("find_files".to_string(), Box::new(FindFilesTool));
-        tools.insert("set_agent_loop_state".to_string(), Box::new(SetAgentLoopStateTool));
+        // tools.insert("set_agent_loop_state".to_string(), Box::new(SetAgentLoopStateTool));
 
         LooperTools { 
             tools
