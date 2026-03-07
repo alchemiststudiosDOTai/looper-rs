@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tools: Arc<dyn LooperTools> = Arc::new(ToolSet::new());
     let (tx, mut rx) = mpsc::channel(10000);
 
-    let mut looper = Looper::new(handler, tools.clone(), tx)?;
+    let mut looper = Looper::new(handler, Some(tools), tx)?;
     let turn_done = Arc::new(Notify::new());
     let turn_done_tx = turn_done.clone();
 

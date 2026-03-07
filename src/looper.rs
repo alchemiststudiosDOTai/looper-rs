@@ -6,6 +6,7 @@ use crate::{
     types::{HandlerToLooperMessage, Handlers, LooperToHandlerToolCallResult, LooperToInterfaceMessage},
 };
 use anyhow::Result;
+use serde_json::json;
 use tokio::sync::{
     Mutex,
     mpsc::{self, Receiver, Sender},
@@ -15,7 +16,7 @@ pub struct Looper {
     handler: Box<dyn ChatHandler>,
     looper_interface_sender: Sender<LooperToInterfaceMessage>,
     handler_looper_receiver: Arc<Mutex<Receiver<HandlerToLooperMessage>>>,
-    tools: Arc<dyn LooperTools>,
+    tools: Option<Arc<dyn LooperTools>>,
 }
 
 #[derive(Debug)]
@@ -27,7 +28,7 @@ pub enum AgentLoopState {
 impl Looper {
     pub fn new(
         handler_type: Handlers,
-        tools: Arc<dyn LooperTools>,
+        tools: Option<Arc<dyn LooperTools>>,
         looper_interface_sender: Sender<LooperToInterfaceMessage>
     ) -> Result<Self> {
         // TODO: Set this to something reasonable, totally just guessed at 10k
@@ -58,15 +59,17 @@ impl Looper {
             }
         };
 
-        let mut tool_defs = tools.get_tools();
-        let set_agent_loop_state = SetAgentLoopStateTool;
-        match handler_type {
-            Handlers::OpenAIResponses(_) | Handlers::OpenAICompletions(_) => {
-                tool_defs.push(set_agent_loop_state.tool());
-            },
-            _ => {}
+        if let Some(t) = &tools {
+            let mut tool_defs = t.get_tools();
+            let set_agent_loop_state = SetAgentLoopStateTool;
+            match handler_type {
+                Handlers::OpenAIResponses(_) | Handlers::OpenAICompletions(_) => {
+                    tool_defs.push(set_agent_loop_state.tool());
+                },
+                _ => {}
+            }
+            handler.set_tools(tool_defs);
         }
-        handler.set_tools(tool_defs);
 
         Ok(Looper {
             handler,
@@ -112,7 +115,11 @@ impl Looper {
                         let response = if tc.name == "set_agent_loop_state" {
                             SetAgentLoopStateTool.execute(&tc.args).await
                         } else {
-                            tools.run_tool(&tc.name, tc.args).await
+                            match &tools {
+                                Some(t) => t.run_tool(&tc.name, tc.args).await,
+                                None => json!({"Error": "Unsupported tool called"})
+                            }
+                            
                         };
 
                         let tc_result = LooperToHandlerToolCallResult {
