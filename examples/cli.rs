@@ -20,8 +20,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     term.clear_screen()?;
     let theme = Theme::default();
 
-    // let handler = Handlers::Anthropic;
-    let handler = Handlers::OpenAIResponses;
+    let handler = Handlers::Anthropic("claude-sonnet-4-6");
     let tools: Arc<dyn LooperTools> = Arc::new(ToolSet::new());
     let (tx, mut rx) = mpsc::channel(10000);
 

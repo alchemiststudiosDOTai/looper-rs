@@ -26,6 +26,7 @@ use crate::{services::ChatHandler, types::{
 
 pub struct AnthropicHandler {
     client: Client,
+    model: String,
     system_message: String,
     messages: Vec<Message>,
     sender: Sender<HandlerToLooperMessage>,
@@ -35,6 +36,7 @@ pub struct AnthropicHandler {
 impl AnthropicHandler {
     pub fn new(
         sender: Sender<HandlerToLooperMessage>,
+        model: &str,
         system_message: &str,
     ) -> Result<Self> {
         let client = Client::default();
@@ -44,6 +46,7 @@ impl AnthropicHandler {
 
         Ok(AnthropicHandler {
             client,
+            model: model.to_string(),
             system_message: system_message.to_string(),
             messages,
             sender,
@@ -54,7 +57,7 @@ impl AnthropicHandler {
     #[async_recursion]
     async fn inner_send_message(&mut self) -> Result<String> {
         let request = CreateMessagesRequestBuilder::default()
-            .model("claude-sonnet-4-6")
+            .model(&self.model)
             .system(self.system_message.clone())
             .messages(self.messages.clone())
             .tools(self.tools.clone())

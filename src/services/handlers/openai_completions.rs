@@ -29,6 +29,7 @@ use crate::{looper::AgentLoopState, services::ChatHandler, types::{
 
 pub struct OpenAIChatHandler {
     client: Client<OpenAIConfig>,
+    model: String,
     messages: Vec<ChatCompletionRequestMessage>,
     sender: Sender<HandlerToLooperMessage>,
     tools: Vec<ChatCompletionTools>,
@@ -38,6 +39,7 @@ pub struct OpenAIChatHandler {
 impl OpenAIChatHandler {
     pub fn new(
         sender: Sender<HandlerToLooperMessage>,
+        model: &str,
         system_message: &str,
     ) -> Result<Self> {
         let client = Client::new();
@@ -51,6 +53,7 @@ impl OpenAIChatHandler {
 
         Ok(OpenAIChatHandler {
             client,
+            model: model.to_string(),
             messages,
             sender,
             tools,
@@ -61,7 +64,7 @@ impl OpenAIChatHandler {
     #[async_recursion]
     async fn inner_send_message(&mut self) -> Result<String> {
         let request = CreateChatCompletionRequestArgs::default()
-            .model("gpt-5.2")
+            .model(&self.model)
             .max_completion_tokens(50000u32)
             .messages(self.messages.clone())
             .tools(self.tools.clone())

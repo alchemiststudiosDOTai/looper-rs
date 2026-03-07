@@ -35,21 +35,24 @@ impl Looper {
         let handler_looper_receiver = Arc::new(Mutex::new(handler_looper_receiver));
 
         let mut handler: Box<dyn ChatHandler> = match handler_type {
-            Handlers::OpenAIResponses => {
+            Handlers::OpenAIResponses(m) => {
                 Box::new(OpenAIResponsesHandler::new(
                     handler_looper_sender,
+                    &m,
                     &get_openai_system_message()
                 )?)
             },
-            Handlers::OpenAICompletions => {
+            Handlers::OpenAICompletions(m) => {
                 Box::new(OpenAIChatHandler::new(
                     handler_looper_sender,
+                    &m,
                     &get_openai_system_message()
                 )?)
             },
-            Handlers::Anthropic => {
+            Handlers::Anthropic(m) => {
                 Box::new(AnthropicHandler::new(
                     handler_looper_sender,
+                    &m,
                     &get_anthropic_system_message()
                 )?)
             }
@@ -58,7 +61,7 @@ impl Looper {
         let mut tool_defs = tools.get_tools();
         let set_agent_loop_state = SetAgentLoopStateTool;
         match handler_type {
-            Handlers::OpenAIResponses | Handlers::OpenAICompletions => {
+            Handlers::OpenAIResponses(_) | Handlers::OpenAICompletions(_) => {
                 tool_defs.push(set_agent_loop_state.tool());
             },
             _ => {}

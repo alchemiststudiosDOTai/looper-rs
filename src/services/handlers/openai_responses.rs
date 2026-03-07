@@ -20,6 +20,7 @@ use crate::{
 
 pub struct OpenAIResponsesHandler {
     client: Client<OpenAIConfig>,
+    model: String,
     previous_response_id: Option<String>,
     sender: Sender<HandlerToLooperMessage>,
     tools: Vec<Tool>,
@@ -28,11 +29,16 @@ pub struct OpenAIResponsesHandler {
 }
 
 impl OpenAIResponsesHandler {
-    pub fn new(sender: Sender<HandlerToLooperMessage>, system_message: &str) -> Result<Self> {
+    pub fn new(
+        sender: Sender<HandlerToLooperMessage>, 
+        model: &str,
+        system_message: &str
+    ) -> Result<Self> {
         let client = Client::new();
 
         Ok(OpenAIResponsesHandler {
             client,
+            model: model.to_string(),
             previous_response_id: None,
             sender,
             tools: Vec::new(),
