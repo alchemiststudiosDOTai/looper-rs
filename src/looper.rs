@@ -88,6 +88,12 @@ impl Looper {
                             .await
                             .unwrap();
                     }
+                    HandlerToLooperMessage::ToolCallPending(index) => {
+                        l_i_s
+                            .send(LooperToInterfaceMessage::ToolCallPending(index))
+                            .await
+                            .unwrap();
+                    }
                     HandlerToLooperMessage::ToolCallRequest(tc) => {
                         l_i_s
                             .send(LooperToInterfaceMessage::ToolCall(tc.name.clone()))

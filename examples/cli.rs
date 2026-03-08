@@ -50,6 +50,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 LooperToInterfaceMessage::ToolCall(name) => {
                     spinner = Some(theme.tool_spinner(&name));
                 },
+                LooperToInterfaceMessage::ToolCallPending(index) => {
+                    // TODO: Implement intelligent swap of tool calls based on index
+                },
                 LooperToInterfaceMessage::TurnComplete => {
                     println!("\n{}", theme.separator_line());
                     turn_done_tx.notify_one();

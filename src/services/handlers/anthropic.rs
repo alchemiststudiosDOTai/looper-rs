@@ -115,6 +115,10 @@ impl AnthropicHandler {
                                                 .entry(index)
                                                 .or_default()
                                                 .push_str(&partial_json);
+
+                                            self.sender
+                                                .send(HandlerToLooperMessage::ToolCallPending(index))
+                                                .await?;
                                         }
                                     }
                                 }

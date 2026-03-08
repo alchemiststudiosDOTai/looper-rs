@@ -3,12 +3,14 @@ use tokio::sync::oneshot::Sender;
 
 type Name = String;
 type Message = String;
+type ToolIndex = usize;
 
 #[derive(Debug)]
 pub enum HandlerToLooperMessage {
     Assistant(Message),
     Thinking(Message),
     ThinkingComplete,
+    ToolCallPending(ToolIndex),
     ToolCallRequest(HandlerToLooperToolCallRequest),
     TurnComplete
 }
@@ -32,6 +34,7 @@ pub enum LooperToInterfaceMessage {
     Assistant(Message),
     Thinking(Message),
     ThinkingComplete,
+    ToolCallPending(ToolIndex),
     ToolCall(Name),
     TurnComplete
 }
