@@ -134,6 +134,8 @@ impl Looper {
                             .send(LooperToInterfaceMessage::TurnComplete)
                             .await
                             .unwrap();
+
+                        break; // to ensure the spawned task gets killed
                     }
                 }
             }
