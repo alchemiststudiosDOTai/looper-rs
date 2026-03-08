@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use crate::{
-    services::{ChatHandler, anthropic::AnthropicHandler, openai_completions::OpenAIChatHandler, openai_responses::OpenAIResponsesHandler},
+    services::{ChatHandler, anthropic::AnthropicHandler, openai_completions::OpenAIChatHandler},
     tools::{LooperTool, LooperTools, SetAgentLoopStateTool},
     types::{HandlerToLooperMessage, Handlers, LooperToHandlerToolCallResult, LooperToInterfaceMessage},
 };
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::{
     Mutex,
     mpsc::{self, Receiver, Sender},
@@ -17,6 +17,7 @@ pub struct Looper {
     looper_interface_sender: Sender<LooperToInterfaceMessage>,
     handler_looper_receiver: Arc<Mutex<Receiver<HandlerToLooperMessage>>>,
     tools: Option<Arc<dyn LooperTools>>,
+    message_history: Option<Value>
 }
 
 #[derive(Debug)]
@@ -28,6 +29,7 @@ pub enum AgentLoopState {
 impl Looper {
     pub fn new(
         handler_type: Handlers,
+        message_history: Option<Value>,
         tools: Option<Arc<dyn LooperTools>>,
         looper_interface_sender: Sender<LooperToInterfaceMessage>
     ) -> Result<Self> {
@@ -36,22 +38,6 @@ impl Looper {
         let handler_looper_receiver = Arc::new(Mutex::new(handler_looper_receiver));
 
         let handler: Box<dyn ChatHandler> = match handler_type {
-            Handlers::OpenAIResponses(m) => {
-                let mut handler = OpenAIResponsesHandler::new(
-                    handler_looper_sender,
-                    &m,
-                    &get_openai_system_message()
-                )?;
-
-                if let Some(t) = &tools {
-                    let mut tool_defs = t.get_tools();
-                    let set_agent_loop_state = SetAgentLoopStateTool;
-                    tool_defs.push(set_agent_loop_state.tool());
-                    handler.set_tools(tool_defs);
-                }
-
-                Box::new(handler)
-            },
             Handlers::OpenAICompletions(m) => {
                 let mut handler = OpenAIChatHandler::new(
                     handler_looper_sender,
@@ -86,13 +72,14 @@ impl Looper {
 
         Ok(Looper {
             handler,
+            message_history,
             looper_interface_sender,
             handler_looper_receiver,
             tools,
         })
     }
 
-    pub async fn send(&mut self, message: &str) -> Result<()> {
+    pub async fn send(&mut self, message: &str) -> Result<Value> {
         let l_i_s = self.looper_interface_sender.clone();
         let h_l_r = self.handler_looper_receiver.clone();
         let tools = self.tools.clone();
@@ -152,9 +139,9 @@ impl Looper {
             }
         });
 
-        self.handler.send_message(message).await?;
+        let messages = self.handler.send_message(self.message_history.clone(), message).await?;
 
-        Ok(())
+        Ok(messages)
     }
 }
 

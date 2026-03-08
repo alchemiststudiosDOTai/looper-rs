@@ -14,6 +14,7 @@ use async_trait::async_trait;
 
 use anyhow::Result;
 use futures::StreamExt;
+use serde_json::Value;
 use tokio::sync::{
     mpsc::Sender,
     oneshot,
@@ -221,7 +222,16 @@ impl AnthropicHandler {
 
 #[async_trait]
 impl ChatHandler for AnthropicHandler {
-    async fn send_message(&mut self, message: &str) -> Result<()> {
+    async fn send_message(
+        &mut self, 
+        message_history: Option<Value>,
+        message: &str
+    ) -> Result<Value> {
+        if let Some(m) = message_history {
+            let messages: Vec<Message> = serde_json::from_value(m)?;
+            self.messages = messages;
+        }
+
         self.messages.push(Message {
             role: MessageRole::User,
             content: MessageContentList(vec![MessageContent::from(message)]),
@@ -233,7 +243,9 @@ impl ChatHandler for AnthropicHandler {
             .send(HandlerToLooperMessage::TurnComplete)
             .await?;
 
-        Ok(())
+        let messages = serde_json::to_value(&self.messages)?;
+
+        Ok(messages)
     }
 
     fn set_tools(&mut self, tools: Vec<LooperToolDefinition>) {

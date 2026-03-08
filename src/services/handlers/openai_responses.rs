@@ -204,7 +204,7 @@ impl OpenAIResponsesHandler {
 
 #[async_trait]
 impl ChatHandler for OpenAIResponsesHandler {
-    async fn send_message(&mut self, message: &str) -> Result<()> {
+    async fn send_message(&mut self, message: &str) -> Result<Value> {
         // reset loop state to continue on each message send
         self.loop_state = AgentLoopState::Done;
 
@@ -219,7 +219,10 @@ impl ChatHandler for OpenAIResponsesHandler {
             .send(HandlerToLooperMessage::TurnComplete)
             .await?;
 
-        Ok(())
+        // TODO: Determine how to handle this for responses api
+        let messages = serde_json::to_value(&self.messages)?;
+
+        Ok(messages)
     }
 
     fn set_tools(&mut self, tools: Vec<LooperToolDefinition>) {

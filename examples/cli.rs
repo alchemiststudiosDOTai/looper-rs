@@ -24,14 +24,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tools: Arc<dyn LooperTools> = Arc::new(ToolSet::new());
     let (tx, mut rx) = mpsc::channel(10000);
 
-    let mut looper = Looper::new(handler, Some(tools), tx)?;
+    let mut looper = Looper::new(handler, None, Some(tools), tx)?;
     let turn_done = Arc::new(Notify::new());
     let turn_done_tx = turn_done.clone();
 
     tokio::spawn(async move{
         let theme = Theme::default();
         let mut spinner: Option<ProgressBar> = None;
-        let mut thinking_buf = String::new();
 
         while let Some(message) = rx.recv().await {
             if let Some(sp) = spinner.take() { sp.finish_and_clear(); }
@@ -302,10 +301,6 @@ impl Theme {
         }
     }
 
-    fn greeting(&self) -> String {
-        format!("{}\n", self.greeting.apply_to("\u{1F980} Welcome to Looper.rs"))
-    }
-
     fn prompt(&self) -> String {
         self.prompt.apply_to("> ").to_string()
     }
@@ -322,18 +317,6 @@ impl Theme {
         );
         sp.set_message(self.tool_spinner.apply_to(name).to_string());
         sp.enable_steady_tick(Duration::from_millis(80));
-        sp
-    }
-
-    fn thinking_spinner(&self) -> ProgressBar {
-        let sp = ProgressBar::new_spinner();
-        sp.set_style(
-            ProgressStyle::default_spinner()
-                .tick_strings(&["·  ", "·· ", "···", " ··", "  ·", "   "])
-                .template("{spinner} thinking")
-                .unwrap()
-        );
-        sp.enable_steady_tick(Duration::from_millis(200));
         sp
     }
 }
