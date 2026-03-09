@@ -113,6 +113,10 @@ impl OpenAIChatHandler {
                                         tool_call.function.arguments.push_str(&arguments);
                                     }
                                 }
+
+                                self.sender
+                                    .send(HandlerToLooperMessage::ToolCallPending(index))
+                                    .await?;
                             }
                         }
 

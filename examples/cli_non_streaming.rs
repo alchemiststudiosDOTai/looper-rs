@@ -14,10 +14,9 @@ use looper::{
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenv::dotenv().ok();
 
-    let handler = Handlers::Anthropic("claude-sonnet-4-6");
     let tools: Arc<dyn LooperTools> = Arc::new(ToolSet::new());
 
-    let mut looper = Looper::builder(handler)
+    let mut looper = Looper::builder(Handlers::OpenAIResponses("gpt-5.4"))
         .tools(tools)
         .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.")
         .build()?;

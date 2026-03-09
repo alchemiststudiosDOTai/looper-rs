@@ -98,6 +98,11 @@ impl OpenAIResponsesHandler {
                         .send(HandlerToLooperMessage::ThinkingComplete)
                         .await?;
                 }
+                Ok(ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(delta)) => {
+                    self.sender
+                        .send(HandlerToLooperMessage::ToolCallPending(delta.output_index as usize))
+                        .await?;
+                }
                 Ok(ResponseStreamEvent::ResponseOutputItemDone(item_done)) => {
                     if let OutputItem::FunctionCall(fc) = item_done.item {
                         let (tx, rx) = oneshot::channel();

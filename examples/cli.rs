@@ -20,11 +20,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     term.clear_screen()?;
     let theme = Theme::default();
 
-    let handler = Handlers::Anthropic("claude-sonnet-4-6");
     let tools: Arc<dyn LooperTools> = Arc::new(ToolSet::new());
     let (tx, mut rx) = mpsc::channel(10000);
 
-    let mut looper = LooperStream::builder(handler)
+    let mut looper = LooperStream::builder(Handlers::Anthropic("claude-sonnet-4-6"))
         .tools(tools)
         .interface_sender(tx)
         .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.")
