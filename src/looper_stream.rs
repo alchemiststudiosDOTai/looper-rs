@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    services::{StreamingChatHandler, anthropic::AnthropicHandler, openai_completions::OpenAIChatHandler},
+    services::{StreamingChatHandler, anthropic::AnthropicHandler, openai_completions::OpenAIChatHandler, openai_responses::OpenAIResponsesHandler},
     tools::LooperTools,
     types::{HandlerToLooperMessage, Handlers, LooperToHandlerToolCallResult, LooperToInterfaceMessage, MessageHistory},
 };
@@ -61,8 +61,18 @@ impl<'a> LooperStreamBuilder<'a> {
 
                 Box::new(handler)
             },
-            Handlers::OpenAIResponses(_m) => {
-                todo!("OpenAI Responses streaming handler not yet implemented")
+            Handlers::OpenAIResponses(m) => {
+                let mut handler = OpenAIResponsesHandler::new(
+                    handler_looper_sender,
+                    &m,
+                    &get_system_message(self.instructions.as_deref())?
+                )?;
+
+                if let Some(t) = &self.tools {
+                    handler.set_tools(t.get_tools());
+                }
+
+                Box::new(handler)
             },
             Handlers::Anthropic(m) => {
                 let mut handler = AnthropicHandler::new(

@@ -2,7 +2,9 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::{chat::ReasoningEffort, responses::{
-        CreateResponseArgs, FunctionCallOutput, FunctionCallOutputItemParam, FunctionToolCall, InputItem, InputParam, Item, OutputItem, Reasoning, ReasoningSummary, ResponseStreamEvent, Tool
+        CreateResponseArgs, FunctionCallOutput, FunctionCallOutputItemParam, FunctionToolCall,
+        InputItem, InputParam, Item, OutputItem, Reasoning, ReasoningSummary,
+        ResponseStreamEvent, Tool,
     }},
 };
 
@@ -11,11 +13,14 @@ use async_trait::async_trait;
 
 use anyhow::Result;
 use futures::StreamExt;
-use serde_json::Value;
 use tokio::sync::{mpsc::Sender, oneshot};
 
 use crate::{
-    services::StreamingChatHandler, types::{HandlerToLooperMessage, HandlerToLooperToolCallRequest, LooperToolDefinition}
+    services::StreamingChatHandler,
+    types::{
+        HandlerToLooperMessage, HandlerToLooperToolCallRequest, LooperToolDefinition,
+        MessageHistory,
+    },
 };
 
 pub struct OpenAIResponsesHandler {
@@ -25,14 +30,13 @@ pub struct OpenAIResponsesHandler {
     sender: Sender<HandlerToLooperMessage>,
     tools: Vec<Tool>,
     instructions: String,
-    loop_state: AgentLoopState
 }
 
 impl OpenAIResponsesHandler {
     pub fn new(
-        sender: Sender<HandlerToLooperMessage>, 
+        sender: Sender<HandlerToLooperMessage>,
         model: &str,
-        system_message: &str
+        system_message: &str,
     ) -> Result<Self> {
         let client = Client::new();
 
@@ -43,36 +47,23 @@ impl OpenAIResponsesHandler {
             sender,
             tools: Vec::new(),
             instructions: system_message.to_string(),
-            loop_state: AgentLoopState::Continue("".to_string())
         })
     }
 
     #[async_recursion]
     async fn inner_send_message(&mut self, input: Option<InputParam>) -> Result<String> {
         let mut builder = CreateResponseArgs::default();
-        match input {
-            Some(i) => {
-                builder
-                    .model("gpt-5.2")
-                    .input(i)
-                    .tools(self.tools.clone())
-                    .reasoning(Reasoning {
-                          effort: Some(ReasoningEffort::High),
-                          summary: Some(ReasoningSummary::Concise),
-                      })
-                    .instructions(self.instructions.clone());
+        builder
+            .model(&self.model)
+            .tools(self.tools.clone())
+            .reasoning(Reasoning {
+                effort: Some(ReasoningEffort::High),
+                summary: Some(ReasoningSummary::Concise),
+            })
+            .instructions(self.instructions.clone());
 
-            },
-            None => {
-                builder
-                    .model("gpt-5.2")
-                    .tools(self.tools.clone())
-                    .reasoning(Reasoning {
-                          effort: Some(ReasoningEffort::High),
-                          summary: Some(ReasoningSummary::Concise),
-                      })
-                    .instructions(self.instructions.clone());
-            }
+        if let Some(i) = input {
+            builder.input(i);
         }
 
         if let Some(ref prev_id) = self.previous_response_id {
@@ -94,28 +85,23 @@ impl OpenAIResponsesHandler {
                     assistant_res_buf.push(text.clone());
                     self.sender
                         .send(HandlerToLooperMessage::Assistant(text))
-                        .await
-                        .unwrap();
+                        .await?;
                 }
                 Ok(ResponseStreamEvent::ResponseReasoningSummaryTextDelta(delta)) => {
                     let text = delta.delta.clone();
                     self.sender
                         .send(HandlerToLooperMessage::Thinking(text))
-                        .await
-                        .unwrap();
+                        .await?;
                 }
                 Ok(ResponseStreamEvent::ResponseReasoningSummaryTextDone(_)) => {
                     self.sender
                         .send(HandlerToLooperMessage::ThinkingComplete)
-                        .await
-                        .unwrap();
+                        .await?;
                 }
                 Ok(ResponseStreamEvent::ResponseOutputItemDone(item_done)) => {
                     if let OutputItem::FunctionCall(fc) = item_done.item {
                         let (tx, rx) = oneshot::channel();
                         let args = serde_json::from_str(&fc.arguments)?;
-
-                        self.handle_agent_loop_state(&fc.name, &args);
 
                         let tcr = HandlerToLooperToolCallRequest {
                             id: fc.call_id.clone(),
@@ -126,8 +112,7 @@ impl OpenAIResponsesHandler {
 
                         self.sender
                             .send(HandlerToLooperMessage::ToolCallRequest(tcr))
-                            .await
-                            .unwrap();
+                            .await?;
 
                         tool_call_receivers.push(rx);
                         function_calls.push(fc);
@@ -159,8 +144,6 @@ impl OpenAIResponsesHandler {
             )
             .await;
 
-            // Pass function call outputs back — the server reconstructs
-            // the full context from previous_response_id
             let input_items: Vec<InputItem> = results
                 .into_iter()
                 .map(|(call_id, value)| {
@@ -178,51 +161,29 @@ impl OpenAIResponsesHandler {
 
         Ok(assistant_res_buf.join(""))
     }
-
-    fn handle_agent_loop_state(&mut self, name: &str, args: &Value) {
-        if name != "set_agent_loop_state" { return; }
-
-        match args.get("state") {
-            Some(s) => {
-                if s == "continue" {
-                    let reason = &args["continue_reason"];
-                    self.loop_state = AgentLoopState::Continue(reason.to_string()); 
-                } else {
-                    self.loop_state = AgentLoopState::Done; 
-                }
-            },
-            None => {
-                // If the model responds with a state that isn't supported
-                // we should just end to avoid infinite loop
-                self.loop_state = AgentLoopState::Done; 
-            }
-        }
-
-    }
-
 }
 
 #[async_trait]
 impl StreamingChatHandler for OpenAIResponsesHandler {
-    async fn send_message(&mut self, message: &str) -> Result<Value> {
-        // reset loop state to continue on each message send
-        self.loop_state = AgentLoopState::Done;
+    async fn send_message(
+        &mut self,
+        message_history: Option<MessageHistory>,
+        message: &str,
+    ) -> Result<MessageHistory> {
+        if let Some(MessageHistory::ResponseId(id)) = message_history {
+            self.previous_response_id = Some(id);
+        }
 
         let input = InputParam::Text(message.to_string());
         self.inner_send_message(Some(input)).await?;
-
-        while let AgentLoopState::Continue(_) = &self.loop_state {
-            self.inner_send_message(None).await?;
-        }
 
         self.sender
             .send(HandlerToLooperMessage::TurnComplete)
             .await?;
 
-        // TODO: Determine how to handle this for responses api
-        let messages = serde_json::to_value(&self.messages)?;
-
-        Ok(messages)
+        Ok(MessageHistory::ResponseId(
+            self.previous_response_id.clone().unwrap_or_default(),
+        ))
     }
 
     fn set_tools(&mut self, tools: Vec<LooperToolDefinition>) {

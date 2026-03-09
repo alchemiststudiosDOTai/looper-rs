@@ -8,6 +8,7 @@ use crate::{
         ChatHandler,
         handlers::anthropic_non_streaming::AnthropicNonStreamingHandler,
         handlers::openai_completions_non_streaming::OpenAINonStreamingChatHandler,
+        handlers::openai_responses_non_streaming::OpenAIResponsesNonStreamingHandler,
     },
     tools::LooperTools,
     types::{Handlers, MessageHistory, turn::TurnResult},
@@ -68,8 +69,17 @@ impl<'a> LooperBuilder<'a> {
 
                 Box::new(handler)
             }
-            Handlers::OpenAIResponses(_m) => {
-                todo!("OpenAI Responses non-streaming handler not yet implemented")
+            Handlers::OpenAIResponses(m) => {
+                let mut handler = OpenAIResponsesNonStreamingHandler::new(
+                    &m,
+                    &get_system_message(self.instructions.as_deref())?,
+                )?;
+
+                if let Some(t) = &self.tools {
+                    handler.set_tools(t.get_tools());
+                }
+
+                Box::new(handler)
             }
         };
 
