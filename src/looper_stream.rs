@@ -33,6 +33,11 @@ impl<'a> LooperStreamBuilder<'a> {
         self
     }
 
+    /// Sub Agent MUST receive a Looper instance with the *SAME* Tools
+    ///
+    /// This is currently a limitation that cannot be enforced a type level.
+    /// The main agent loop is expecting the Sub Agent to have the same tools
+    /// that it has!
     pub fn sub_agent(mut self, looper: Looper) -> Self {
         self.sub_agent = Some(looper);
         self
