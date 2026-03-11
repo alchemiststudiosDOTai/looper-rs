@@ -2,29 +2,28 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tera::{Tera, Context};
+use tokio::sync::Mutex;
 
 use crate::{
     services::{
-        ChatHandler,
-        handlers::anthropic_non_streaming::AnthropicNonStreamingHandler,
-        handlers::openai_completions_non_streaming::OpenAINonStreamingChatHandler,
-        handlers::openai_responses_non_streaming::OpenAIResponsesNonStreamingHandler,
+        handlers::{anthropic_non_streaming::AnthropicNonStreamingHandler, openai_completions_non_streaming::OpenAINonStreamingChatHandler, openai_responses_non_streaming::OpenAIResponsesNonStreamingHandler}, ChatHandler
     },
-    tools::LooperTools,
-    types::{Handlers, MessageHistory, turn::TurnResult},
+    tools::{LooperTools, SubAgentTool},
+    types::{turn::TurnResult, Handlers, MessageHistory},
 };
 
 pub struct Looper {
     handler: Box<dyn ChatHandler>,
     message_history: Option<MessageHistory>,
-    tools: Option<Arc<dyn LooperTools>>,
+    tools: Option<Arc<Mutex<dyn LooperTools>>>,
 }
 
 pub struct LooperBuilder<'a> {
     handler_type: Handlers<'a>,
     message_history: Option<MessageHistory>,
-    tools: Option<Arc<dyn LooperTools>>,
+    tools: Option<Arc<Mutex<dyn LooperTools>>>,
     instructions: Option<String>,
+    sub_agent: Option<Looper>,
 }
 
 impl<'a> LooperBuilder<'a> {
@@ -33,8 +32,18 @@ impl<'a> LooperBuilder<'a> {
         self
     }
 
-    pub fn tools(mut self, tools: Arc<dyn LooperTools>) -> Self {
+    pub fn tools(mut self, tools: Arc<Mutex<dyn LooperTools>>) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    /// Sub Agent MUST receive a Looper instance with the *SAME* Tools
+    ///
+    /// This is currently a limitation that cannot be enforced a type level.
+    /// The main agent loop is expecting the Sub Agent to have the same tools
+    /// that it has!
+    pub fn sub_agent(mut self, looper: Looper) -> Self {
+        self.sub_agent = Some(looper);
         self
     }
 
@@ -43,7 +52,7 @@ impl<'a> LooperBuilder<'a> {
         self
     }
 
-    pub fn build(self) -> Result<Looper> {
+    pub async fn build(mut self) -> Result<Looper> {
         let handler: Box<dyn ChatHandler> = match self.handler_type {
             Handlers::Anthropic(m) => {
                 let mut handler = AnthropicNonStreamingHandler::new(
@@ -51,8 +60,14 @@ impl<'a> LooperBuilder<'a> {
                     &get_system_message(self.instructions.as_deref())?,
                 )?;
 
-                if let Some(t) = &self.tools {
-                    handler.set_tools(t.get_tools());
+                if let Some(t) = self.tools.as_mut() {
+                    let mut t = t.lock().await;
+
+                    if let Some(sa) = self.sub_agent {
+                        let agent_tools = Arc::new(Mutex::new(SubAgentTool::new(sa)));
+                        let _ = t.add_tool(agent_tools).await;
+                    }
+                    handler.set_tools(t.get_tools().await);
                 }
 
                 Box::new(handler)
@@ -63,8 +78,14 @@ impl<'a> LooperBuilder<'a> {
                     &get_system_message(self.instructions.as_deref())?,
                 )?;
 
-                if let Some(t) = &self.tools {
-                    handler.set_tools(t.get_tools());
+                if let Some(t) = self.tools.as_mut() {
+                    let mut t = t.lock().await;
+
+                    if let Some(sa) = self.sub_agent {
+                        let agent_tools = Arc::new(Mutex::new(SubAgentTool::new(sa)));
+                        let _ = t.add_tool(agent_tools).await;
+                    }
+                    handler.set_tools(t.get_tools().await);
                 }
 
                 Box::new(handler)
@@ -75,8 +96,14 @@ impl<'a> LooperBuilder<'a> {
                     &get_system_message(self.instructions.as_deref())?,
                 )?;
 
-                if let Some(t) = &self.tools {
-                    handler.set_tools(t.get_tools());
+                if let Some(t) = self.tools.as_mut() {
+                    let mut t = t.lock().await;
+
+                    if let Some(sa) = self.sub_agent {
+                        let agent_tools = Arc::new(Mutex::new(SubAgentTool::new(sa)));
+                        let _ = t.add_tool(agent_tools).await;
+                    }
+                    handler.set_tools(t.get_tools().await);
                 }
 
                 Box::new(handler)
@@ -97,6 +124,7 @@ impl Looper {
             handler_type,
             message_history: None,
             tools: None,
+            sub_agent: None,
             instructions: None,
         }
     }
