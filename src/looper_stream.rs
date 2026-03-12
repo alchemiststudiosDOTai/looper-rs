@@ -6,6 +6,7 @@ use crate::{
     looper::Looper,
     services::{
         StreamingChatHandler, anthropic::AnthropicHandler,
+        gemini::GeminiHandler,
         openai_completions::OpenAIChatHandler, openai_responses::OpenAIResponsesHandler
     },
     tools::{
@@ -117,6 +118,23 @@ impl<'a> LooperStreamBuilder<'a> {
             },
             Handlers::Anthropic(m) => {
                 let mut handler = AnthropicHandler::new(
+                    handler_looper_sender,
+                    &m,
+                    &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                )?;
+
+                if let Some(t) = self.tools.as_mut() {
+                    if let Some(sa) = self.sub_agent {
+                        let agent_tools = Arc::new(SubAgentTool::new(sa));
+                        let _ = t.add_tool(agent_tools).await;
+                    }
+                    handler.set_tools(t.get_tools().await);
+                }
+
+                Box::new(handler)
+            }
+            Handlers::Gemini(m) => {
+                let mut handler = GeminiHandler::new(
                     handler_looper_sender,
                     &m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,

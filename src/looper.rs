@@ -6,8 +6,9 @@ use tera::{Tera, Context};
 use crate::{
     services::{
         ChatHandler, handlers::{
-            anthropic_non_streaming::AnthropicNonStreamingHandler, 
-            openai_completions_non_streaming::OpenAINonStreamingChatHandler, 
+            anthropic_non_streaming::AnthropicNonStreamingHandler,
+            gemini_non_streaming::GeminiNonStreamingHandler,
+            openai_completions_non_streaming::OpenAINonStreamingChatHandler,
             openai_responses_non_streaming::OpenAIResponsesNonStreamingHandler
         }
     },
@@ -97,6 +98,22 @@ impl<'a> LooperBuilder<'a> {
             }
             Handlers::OpenAIResponses(m) => {
                 let mut handler = OpenAIResponsesNonStreamingHandler::new(
+                    &m,
+                    &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                )?;
+
+                if let Some(t) = self.tools.as_mut() {
+                    if let Some(sa) = self.sub_agent {
+                        let agent_tools = Arc::new(SubAgentTool::new(sa));
+                        let _ = t.add_tool(agent_tools).await;
+                    }
+                    handler.set_tools(t.get_tools().await);
+                }
+
+                Box::new(handler)
+            }
+            Handlers::Gemini(m) => {
+                let mut handler = GeminiNonStreamingHandler::new(
                     &m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
                 )?;

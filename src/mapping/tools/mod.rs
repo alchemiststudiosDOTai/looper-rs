@@ -2,6 +2,8 @@ pub mod anthropic;
 #[allow(unused_imports)]
 pub use anthropic::*;
 
+pub mod gemini;
+
 pub mod openai_completions;
 #[allow(unused_imports)]
 pub use openai_completions::*;

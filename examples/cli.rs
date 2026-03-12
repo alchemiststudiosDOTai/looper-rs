@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // NOTE: For now, agent_looper doesn't need to stream tokens since the user
     // doesn't directly see it's token stream anyway. Might as well just leave it
     // as non-streaming, unless there is obviously value to changing this.
-    let agent_looper = Looper::builder(Handlers::OpenAIResponses("gpt-5-mini"))
+    let agent_looper = Looper::builder(Handlers::Gemini("gemini-3-flash-preview"))
         .tools(agent_tools)
         .instructions("
             You are an agent researching specific tasks for another agent that is invoking you.
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ")
         .build().await?;
 
-    let mut looper = LooperStream::builder(Handlers::OpenAIResponses("gpt-5.4"))
+    let mut looper = LooperStream::builder(Handlers::Gemini("gemini-3-flash-preview"))
         .sub_agent(agent_looper)
         .tools(tools)
         .interface_sender(tx)

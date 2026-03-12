@@ -6,6 +6,7 @@ pub enum Handlers<'a> {
     OpenAICompletions(Model<'a>),
     OpenAIResponses(Model<'a>),
     Anthropic(Model<'a>),
+    Gemini(Model<'a>),
 }
 
 #[derive(Debug, Clone)]

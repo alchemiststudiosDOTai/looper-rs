@@ -16,7 +16,7 @@ It's just like using Claude Code or Codex SDK but without the underlying process
 ## Features
 
 - Streaming and non-streaming modes
-- Multi-provider support (OpenAI Completions, OpenAI Responses, Anthropic)
+- Multi-provider support (OpenAI Completions, OpenAI Responses, Anthropic, Gemini)
 - Agentic loop with concurrent tool calling
 - Dynamic tool injection
 - Sub-agent delegation
@@ -98,6 +98,7 @@ A future TODO here is to provide more options that are "provider and model" awar
 | `Handlers::OpenAICompletions(model)` | `"gpt-5.4"` |
 | `Handlers::OpenAIResponses(model)` | `"gpt-5.4"` |
 | `Handlers::Anthropic(model)` | `"claude-sonnet-4-6"` |
+| `Handlers::Gemini(model)` | `"gemini-2.5-flash"` |
 
 
 ## Architecture
@@ -141,7 +142,7 @@ sequenceDiagram
 
 ```sh
 cp .env.example .env
-# Add your OPENAI_API_KEY to .env
+# Add your API keys to .env (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY)
 ```
 
 
