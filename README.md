@@ -46,7 +46,7 @@ Forwards events (text deltas, thinking, tool calls) over an `mpsc` channel as th
 ```rust
 let (tx, mut rx) = mpsc::channel(10000);
 
-let mut looper = LooperStream::builder(Handlers::Anthropic("claude-sonnet-4-20250514"))
+let mut looper = LooperStream::builder(Handlers::Anthropic("claude-sonnet-4-6"))
     .tools(tools)
     .interface_sender(tx)
     .instructions("Be helpful.")
