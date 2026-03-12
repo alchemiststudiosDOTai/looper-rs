@@ -4,18 +4,24 @@
 
 [Demo video (MP4)](./assets/Demo.mp4)
 
-A very barebones, lightweight, agentic loop made to be plugged into any UI chat interface (CLI, web, desktop, etc).
+A very barebones, lightweight, headless agentic loop made to be plugged into any UI chat interface (CLI, web, desktop, etc).
 
 The purpose of this is to avoid having to us Claude Code/Codex CLI which require sub processes of themselves to be spawned per user chat session. This become unscalable quickly with even just a few dozen sessions.
 
 This tool is *not* meant to be as robust as Claude Code/Codex. It's meant to be a lighter weight, more practical solution to their heavy SDKs.
 
+### What is a "headless" Agent Loop?
+It's just like using Claude Code or Codex SDK but without the underlying process bloat. It doesn't care what the interface is, you can render messages however you want.
+
 ## Features
 
-- Clear separation of concerns between the UI and the agentic loop and handlers
-- Agentic loop with tool use (read/write files, grep, find, list directory)
-- UI event stream (assistant messages, thinking, tool usage)
+- Streaming and non-streaming modes
+- Multi-provider support (OpenAI Completions, OpenAI Responses, Anthropic)
+- Agentic loop with concurrent tool calling
 - Dynamic tool injection
+- Sub-agent delegation
+- Buffered output mode for smooth char-by-char rendering
+- UI agnostic event stream (assistant text, thinking, tool calls, turn completion)
 
 ## Usage
 
@@ -26,7 +32,8 @@ Returns the complete response after the agent loop finishes. Good for background
 ```rust
 let mut looper = Looper::builder(Handlers::OpenAIResponses("gpt-5.4"))
     .instructions("Be helpful.")
-    .build().await?;
+    .build()
+    .await?;
 
 let result = looper.send("What files are in this directory?").await?;
 println!("{}", result.final_text.unwrap());
@@ -43,7 +50,8 @@ let mut looper = LooperStream::builder(Handlers::Anthropic("claude-sonnet-4-2025
     .tools(tools)
     .interface_sender(tx)
     .instructions("Be helpful.")
-    .build().await?;
+    .build()
+    .await?;
 
 // consume events in a separate task
 tokio::spawn(async move {
