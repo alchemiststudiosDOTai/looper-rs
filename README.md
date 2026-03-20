@@ -19,6 +19,7 @@ It's just like using Claude Code or Codex SDK but without the underlying process
 - Multi-provider support (OpenAI Completions, OpenAI Responses, Anthropic, Gemini)
 - Agentic loop with concurrent tool calling
 - Dynamic tool injection
+- Built-in `ask_user` tool for human-in-the-loop answers
 - Sub-agent delegation
 - Buffered output mode for smooth char-by-char rendering
 - UI agnostic event stream (assistant text, thinking, tool calls, turn completion)
@@ -147,6 +148,8 @@ cp .env.example .env
 
 
 ### Running Examples
+
+The non-streaming CLI example includes file-system tools, sub-agent support, and an `ask_user` tool that lets the model request missing information from the human operator.
 
 ```sh
 cargo run --example cli              # streaming

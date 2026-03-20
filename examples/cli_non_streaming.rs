@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use looper::{
     looper::Looper,
-    tools::{LooperTool, LooperTools},
+    tools::{AskUserHandler, AskUserTool, LooperTool, LooperTools},
     types::{Handlers, LooperToolDefinition},
 };
 use tokio::sync::Mutex;
@@ -15,18 +15,19 @@ use tokio::sync::Mutex;
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenv::dotenv().ok();
 
-    let tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
-    let agent_tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
+    let ask_user_handler: Arc<dyn AskUserHandler> = Arc::new(CliAskUserHandler);
+    let tools: Box<dyn LooperTools> = Box::new(ToolSet::new(ask_user_handler.clone()));
+    let agent_tools: Box<dyn LooperTools> = Box::new(ToolSet::new(ask_user_handler.clone()));
 
     let agent_looper = Looper::builder(Handlers::OpenAIResponses("gpt-5.4"))
         .tools(agent_tools)
-        .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.")
+        .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful. If you need information that only the user can provide, use the ask_user tool.")
         .build().await?;
 
     let mut looper = Looper::builder(Handlers::OpenAIResponses("gpt-5.4"))
         .tools(tools)
         .sub_agent(agent_looper)
-        .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.")
+        .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful. If you need information that only the user can provide, use the ask_user tool.")
         .build().await?;
 
 
@@ -66,6 +67,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
 // ── Tool implementations ────────────────────────────────────────────
+
+struct CliAskUserHandler;
+
+#[async_trait]
+impl AskUserHandler for CliAskUserHandler {
+    async fn ask_user(&self, question: String, context: Option<String>) -> anyhow::Result<String> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            println!("\n[ask_user]");
+            if let Some(context) = context {
+                println!("context: {}", context);
+            }
+            println!("question: {}", question);
+            print!("answer> ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+
+            Ok(input.trim().to_string())
+        })
+        .await?
+    }
+}
 
 struct ReadFileTool;
 
@@ -143,10 +167,11 @@ struct ToolSet {
 }
 
 impl ToolSet {
-    fn new() -> Self {
+    fn new(ask_user_handler: Arc<dyn AskUserHandler>) -> Self {
         let mut tools: HashMap<String, Mutex<Arc<dyn LooperTool>>> = HashMap::new();
         tools.insert("read_file".to_string(), Mutex::new(Arc::new(ReadFileTool)));
         tools.insert("list_directory".to_string(), Mutex::new(Arc::new(ListDirectoryTool)));
+        tools.insert("ask_user".to_string(), Mutex::new(Arc::new(AskUserTool::new(ask_user_handler))));
         ToolSet { tools }
     }
 }

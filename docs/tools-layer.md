@@ -3,7 +3,7 @@ title: "Tools Layer"
 when_to_read:
   - "When you are implementing a new tool or tool registry and need to understand what the handlers expect."
   - "When you are debugging tool execution, sub-agent injection, or why a model sees a tool but cannot use it correctly."
-summary: "The `tools` module is the capability boundary between the model-facing agent loop and your application logic. A `LooperTool` describes and executes one tool, while a `LooperTools` implementation is the registry and dispatcher that exposes tools to handlers, runs them by name, and optionally accepts injected capabilities like the built-in sub-agent tool."
+summary: "The `tools` module is the capability boundary between the model-facing agent loop and your application logic. A `LooperTool` describes and executes one tool, while a `LooperTools` implementation is the registry and dispatcher that exposes tools to handlers, runs them by name, and optionally accepts injected capabilities like the built-in sub-agent and ask-user tools."
 ontology_relations:
   - relation: "depends_on"
     target: "src/types/tool.rs"
@@ -30,6 +30,7 @@ Plain-English version: this is the layer where the model's requested actions bec
 This page covers:
 
 - `src/tools/mod.rs`
+- `src/tools/ask_user.rs`
 - `src/tools/empty.rs`
 - `src/tools/sub_agent.rs`
 - the example `ToolSet` implementations in `examples/cli.rs` and `examples/cli_non_streaming.rs`
@@ -60,6 +61,8 @@ That is why the module has two traits instead of one.
 
 The built-ins are:
 
+- [`AskUserTool`](/Users/tuna/looper-rs/src/tools/ask_user.rs:12)
+  a human-in-the-loop tool that asks the caller for missing information
 - [`EmptyToolSet`](/Users/tuna/looper-rs/src/tools/empty.rs:8)
   a no-tools fallback
 - [`SubAgentTool`](/Users/tuna/looper-rs/src/tools/sub_agent.rs:7)
@@ -162,6 +165,25 @@ There is no full built-in mutable tool registry in `src/tools`; you are expected
 
 ## Built-in tool implementations
 
+### `AskUserTool`
+
+[`AskUserTool`](/Users/tuna/looper-rs/src/tools/ask_user.rs:12) is a built-in tool for human-in-the-loop turns.
+
+Its schema exposes:
+
+- `question: string`
+- `context: string` optional
+
+Its execution path is:
+
+1. parse the question payload from the tool call
+2. call an application-provided [`AskUserHandler`](/Users/tuna/looper-rs/src/tools/ask_user.rs:9)
+3. return either:
+   - `{ "question": ..., "context": ..., "answer": ... }`
+   - or an error payload
+
+This keeps the tool definition inside the crate while leaving the actual UI-specific user interaction in application code.
+
 ### `EmptyToolSet`
 
 [`EmptyToolSet`](/Users/tuna/looper-rs/src/tools/empty.rs:8) is the default fallback when no tools are provided.
@@ -207,6 +229,7 @@ So the tools layer is not just a passive trait boundary. It is also the place wh
 - `run_tool(...)` must be safe under concurrent access because handlers execute tool calls in parallel.
 - A `LooperTools` implementation must be able to expose tool schemas and execute the same tools consistently by name.
 - If you want sub-agent support, your registry must support `add_tool(...)`.
+- `AskUserTool` depends on an application-provided `AskUserHandler`; the crate defines the tool contract but not the concrete UI prompt behavior.
 - Tools are allowed to be stateful because `execute(...)` takes `&mut self`, but the registry is responsible for making mutable access safe.
 
 ## Failure modes
@@ -216,6 +239,7 @@ So the tools layer is not just a passive trait boundary. It is also the place wh
 - If `tool().name` and `get_tool_name()` do not match, the model-facing schema and runtime dispatch key can diverge in subtle ways.
 - A registry that is not concurrency-safe can corrupt state or deadlock when handlers run multiple tools at once.
 - The example registry pattern uses `Arc::get_mut(...)`, which assumes the registry holds the only strong reference to each tool. If that assumption stops being true, execution will panic.
+- `AskUserTool` can pause the agent loop until the application-provided handler returns an answer or error.
 - `SubAgentTool` depends on a child `Looper` that is expected to have the same practical tool capability set as the parent, minus sub-agent recursion. That assumption is documented but not enforced by the type system.
 
 # Related docs
