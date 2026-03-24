@@ -16,7 +16,9 @@ use looper::{
     looper::Looper,
     looper_stream::LooperStream,
     tools::{LooperTool, LooperTools},
-    types::{Handlers, LooperToInterfaceMessage, LooperToolDefinition},
+    types::{
+        Handlers, LooperToHandlerToolCallResult, LooperToInterfaceMessage, LooperToolDefinition,
+    },
 };
 
 #[tokio::main]
@@ -30,11 +32,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let agent_tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
 
     let (tx, mut rx) = mpsc::channel(10000);
-
+    let (user_response_tx, user_response_rx) = mpsc::channel(1);
     // NOTE: For now, agent_looper doesn't need to stream tokens since the user
     // doesn't directly see it's token stream anyway. Might as well just leave it
     // as non-streaming, unless there is obviously value to changing this.
-    let agent_looper = Looper::builder(Handlers::Gemini("gemini-3-flash-preview"))
+    let agent_looper = Looper::builder(Handlers::OpenAIResponses("gpt-5-mini"))
         .tools(agent_tools)
         .instructions("
             You are an agent researching specific tasks for another agent that is invoking you.
@@ -42,10 +44,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ")
         .build().await?;
 
-    let mut looper = LooperStream::builder(Handlers::Gemini("gemini-3-flash-preview"))
+    let mut looper = LooperStream::builder(Handlers::OpenAIResponses("gpt-5-mini"))
         .sub_agent(agent_looper)
         .tools(tools)
         .interface_sender(tx)
+        .user_response_receiver(user_response_rx)
         .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.")
         .buffered_output()
         .build().await?;
@@ -56,6 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         let theme = Theme::default();
         let mut spinner: Option<ProgressBar> = None;
+        let user_response_tx = user_response_tx;
 
         while let Some(message) = rx.recv().await {
             if let Some(sp) = spinner.take() {
@@ -76,6 +80,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 LooperToInterfaceMessage::ToolCall(name) => {
                     spinner = Some(theme.tool_spinner(&name));
+                }
+                LooperToInterfaceMessage::UserInputRequest(request) => {
+                    println!("\n{}", theme.separator_line());
+                    println!("Question: {}", request.question);
+                    if let Some(context) = request.context.as_deref() {
+                        println!("Context: {}", context);
+                    }
+                    if !request.options.is_empty() {
+                        println!("Options: {}", request.options.join(", "));
+                    }
+                    print!("answer> ");
+                    io::stdout().flush().ok();
+
+                    let mut answer = String::new();
+                    io::stdin().read_line(&mut answer).ok();
+                    let answer = answer.trim().to_string();
+
+                    let payload = if request.options.iter().any(|option| option == &answer) {
+                        json!({ "answer": answer, "selected_option": answer })
+                    } else {
+                        json!({ "answer": answer })
+                    };
+
+                    let _ = user_response_tx
+                        .send(LooperToHandlerToolCallResult {
+                            id: request.id,
+                            value: payload,
+                        })
+                        .await;
                 }
                 LooperToInterfaceMessage::ToolCallPending(_id) => {
                     // TODO: Implement intelligent swap of tool calls based on id

@@ -10,15 +10,25 @@ use async_trait::async_trait;
 use anyhow::Result;
 use futures::TryStreamExt;
 
-use tokio::{sync::mpsc::Sender, task::JoinSet};
+use tokio::{
+    sync::{
+        Mutex,
+        mpsc::{Receiver, Sender},
+    },
+    task::JoinSet,
+};
 
 use crate::{
     mapping::tools::gemini::to_gemini_tool,
-    services::StreamingChatHandler,
+    services::{
+        StreamingChatHandler,
+        human_in_the_loop::{await_user_input, emit_tool_call_complete, emit_tool_call_request},
+    },
     tools::LooperTools,
+    tools::{ask_user_question_batch_error, is_ask_user_question_tool},
     types::{
-        HandlerToLooperMessage, HandlerToLooperToolCallRequest, LooperToolDefinition,
-        MessageHistory,
+        HandlerToLooperMessage, HandlerToLooperToolCallRequest, LooperToHandlerToolCallResult,
+        LooperToolDefinition, MessageHistory,
     },
 };
 
@@ -28,6 +38,7 @@ pub struct GeminiHandler {
     messages: Vec<Message>,
     sender: Sender<HandlerToLooperMessage>,
     tool: Option<Tool>,
+    user_response_receiver: Option<Arc<Mutex<Receiver<LooperToHandlerToolCallResult>>>>,
 }
 
 impl GeminiHandler {
@@ -35,6 +46,7 @@ impl GeminiHandler {
         sender: Sender<HandlerToLooperMessage>,
         model: &str,
         system_message: &str,
+        user_response_receiver: Option<Arc<Mutex<Receiver<LooperToHandlerToolCallResult>>>>,
     ) -> Result<Self> {
         let api_key = std::env::var("GEMINI_API_KEY")
             .or_else(|_| std::env::var("GOOGLE_API_KEY"))
@@ -55,6 +67,7 @@ impl GeminiHandler {
             messages: vec![],
             sender,
             tool: None,
+            user_response_receiver,
         })
     }
 
@@ -76,7 +89,6 @@ impl GeminiHandler {
 
         let mut all_text = String::new();
         let mut thinking_text = String::new();
-        // Store function calls with their pre-assigned IDs
         let mut function_calls: Vec<(gemini_rust::FunctionCall, Option<String>, String)> =
             Vec::new();
         let mut had_thinking = false;
@@ -98,7 +110,6 @@ impl GeminiHandler {
                 .await?;
         }
 
-        // Build assistant content parts for message history
         let mut assistant_parts: Vec<Part> = Vec::new();
 
         if !thinking_text.is_empty() {
@@ -117,36 +128,21 @@ impl GeminiHandler {
             });
         }
 
-        // Process function calls
-        let mut tool_join_set = JoinSet::new();
+        let mut tool_calls: Vec<HandlerToLooperToolCallRequest> = Vec::new();
 
         for (fc, thought_sig, tool_id) in &function_calls {
-            let tcr = HandlerToLooperToolCallRequest {
+            tool_calls.push(HandlerToLooperToolCallRequest {
                 id: tool_id.clone(),
                 name: fc.name.clone(),
                 args: fc.args.clone(),
-            };
-
-            self.sender
-                .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
-                .await?;
+            });
 
             assistant_parts.push(Part::FunctionCall {
                 function_call: fc.clone(),
                 thought_signature: thought_sig.clone(),
             });
-
-            let tr = tools_runner.clone();
-            let tool_name = fc.name.clone();
-            let tool_input = fc.args.clone();
-
-            tool_join_set.spawn(async move {
-                let result = tr.run_tool(tool_name, tool_input).await;
-                (result, tcr)
-            });
         }
 
-        // Push assistant message to history
         if !assistant_parts.is_empty() {
             self.messages.push(Message {
                 content: Content {
@@ -157,18 +153,74 @@ impl GeminiHandler {
             });
         }
 
-        // Execute tool calls and collect results
-        if !tool_join_set.is_empty() {
+        if !tool_calls.is_empty() {
+            if tool_calls
+                .iter()
+                .any(|call| is_ask_user_question_tool(&call.name))
+            {
+                let mut function_response_parts: Vec<Part> = Vec::new();
+
+                if tool_calls.len() > 1 {
+                    for tool_call in tool_calls {
+                        emit_tool_call_request(&self.sender, &tool_call).await?;
+                        emit_tool_call_complete(&self.sender, tool_call.id.clone()).await?;
+
+                        function_response_parts.push(Part::FunctionResponse {
+                            function_response: FunctionResponse {
+                                name: tool_call.name,
+                                response: Some(ask_user_question_batch_error()),
+                            },
+                        });
+                    }
+                } else {
+                    let tool_call = tool_calls.into_iter().next().unwrap();
+                    let response =
+                        await_user_input(&self.sender, &self.user_response_receiver, &tool_call)
+                            .await?;
+
+                    emit_tool_call_complete(&self.sender, tool_call.id.clone()).await?;
+
+                    function_response_parts.push(Part::FunctionResponse {
+                        function_response: FunctionResponse {
+                            name: tool_call.name,
+                            response: Some(response),
+                        },
+                    });
+                }
+
+                self.messages.push(Message {
+                    content: Content {
+                        parts: Some(function_response_parts),
+                        role: Some(Role::User),
+                    },
+                    role: Role::User,
+                });
+
+                return self.inner_send_message(tools_runner).await;
+            }
+
+            let mut tool_join_set = JoinSet::new();
+
+            for tool_call in tool_calls {
+                emit_tool_call_request(&self.sender, &tool_call).await?;
+
+                let tr = tools_runner.clone();
+                let tool_name = tool_call.name.clone();
+                let tool_input = tool_call.args.clone();
+                let tool_request = tool_call.clone();
+
+                tool_join_set.spawn(async move {
+                    let result = tr.run_tool(tool_name, tool_input).await;
+                    (result, tool_request)
+                });
+            }
+
             let mut function_response_parts: Vec<Part> = Vec::new();
 
             while let Some(result) = tool_join_set.join_next().await {
                 match result {
                     Ok((result, tool_use)) => {
-                        self.sender
-                            .send(HandlerToLooperMessage::ToolCallComplete(
-                                tool_use.id.clone(),
-                            ))
-                            .await?;
+                        emit_tool_call_complete(&self.sender, tool_use.id.clone()).await?;
 
                         function_response_parts.push(Part::FunctionResponse {
                             function_response: FunctionResponse {
@@ -186,7 +238,6 @@ impl GeminiHandler {
                 }
             }
 
-            // Push function response message to history
             self.messages.push(Message {
                 content: Content {
                     parts: Some(function_response_parts),

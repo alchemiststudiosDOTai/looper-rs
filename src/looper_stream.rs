@@ -8,8 +8,14 @@ use crate::{
         StreamingChatHandler, anthropic::AnthropicHandler, gemini::GeminiHandler,
         openai_completions::OpenAIChatHandler, openai_responses::OpenAIResponsesHandler,
     },
-    tools::{EmptyToolSet, LooperTools, SubAgentTool},
-    types::{HandlerToLooperMessage, Handlers, LooperToInterfaceMessage, MessageHistory},
+    tools::{
+        ASK_USER_QUESTION_TOOL_NAME, EmptyToolSet, LooperTools, SubAgentTool,
+        ask_user_question_tool_definition,
+    },
+    types::{
+        HandlerToLooperMessage, Handlers, LooperToHandlerToolCallResult, LooperToInterfaceMessage,
+        MessageHistory,
+    },
 };
 use anyhow::Result;
 use tera::{Context, Tera};
@@ -29,6 +35,7 @@ pub struct LooperStreamBuilder<'a> {
     tools: Option<Box<dyn LooperTools>>,
     instructions: Option<String>,
     interface_sender: Option<Sender<LooperToInterfaceMessage>>,
+    user_response_receiver: Option<mpsc::Receiver<LooperToHandlerToolCallResult>>,
     sub_agent: Option<Looper>,
     buffered_output: bool,
 }
@@ -64,6 +71,14 @@ impl<'a> LooperStreamBuilder<'a> {
         self
     }
 
+    pub fn user_response_receiver(
+        mut self,
+        receiver: mpsc::Receiver<LooperToHandlerToolCallResult>,
+    ) -> Self {
+        self.user_response_receiver = Some(receiver);
+        self
+    }
+
     pub fn buffered_output(mut self) -> Self {
         self.buffered_output = true;
         self
@@ -73,22 +88,53 @@ impl<'a> LooperStreamBuilder<'a> {
         let sub_agent_enabled = self.sub_agent.is_some();
         let (handler_looper_sender, mut handler_looper_receiver) = mpsc::channel(10000);
 
+        if self.user_response_receiver.is_some() && self.interface_sender.is_none() {
+            anyhow::bail!(
+                "user_response_receiver requires interface_sender so the UI can receive ask_user_question requests"
+            );
+        }
+
+        if let Some(t) = self.tools.as_mut()
+            && let Some(sa) = self.sub_agent.take()
+        {
+            let agent_tools = Arc::new(SubAgentTool::new(sa));
+            let _ = t.add_tool(agent_tools).await;
+        }
+
+        let mut tool_definitions = if let Some(t) = self.tools.as_mut() {
+            t.get_tools().await
+        } else {
+            Vec::new()
+        };
+
+        if self.user_response_receiver.is_some() {
+            if tool_definitions
+                .iter()
+                .any(|tool| tool.name == ASK_USER_QUESTION_TOOL_NAME)
+            {
+                anyhow::bail!(
+                    "tool set already contains a tool named {}",
+                    ASK_USER_QUESTION_TOOL_NAME
+                );
+            }
+
+            tool_definitions.push(ask_user_question_tool_definition());
+        }
+
+        let user_response_receiver = self
+            .user_response_receiver
+            .take()
+            .map(|receiver| Arc::new(tokio::sync::Mutex::new(receiver)));
+
         let handler: Box<dyn StreamingChatHandler> = match self.handler_type {
             Handlers::OpenAICompletions(m) => {
                 let mut handler = OpenAIChatHandler::new(
                     handler_looper_sender,
                     m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                    user_response_receiver.clone(),
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::OpenAIResponses(m) => {
@@ -96,16 +142,9 @@ impl<'a> LooperStreamBuilder<'a> {
                     handler_looper_sender,
                     m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                    user_response_receiver.clone(),
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::Anthropic(m) => {
@@ -113,16 +152,9 @@ impl<'a> LooperStreamBuilder<'a> {
                     handler_looper_sender,
                     m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                    user_response_receiver.clone(),
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::Gemini(m) => {
@@ -130,16 +162,9 @@ impl<'a> LooperStreamBuilder<'a> {
                     handler_looper_sender,
                     m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                    user_response_receiver.clone(),
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
         };
@@ -227,6 +252,7 @@ impl LooperStream {
             sub_agent: None,
             instructions: None,
             interface_sender: None,
+            user_response_receiver: None,
             buffered_output: false,
         }
     }
@@ -269,6 +295,9 @@ async fn forward_non_text(
         }
         HandlerToLooperMessage::ToolCallRequest(tc) => {
             LooperToInterfaceMessage::ToolCall(tc.name.clone())
+        }
+        HandlerToLooperMessage::UserInputRequest(req) => {
+            LooperToInterfaceMessage::UserInputRequest(req)
         }
         HandlerToLooperMessage::ToolCallComplete(id) => {
             LooperToInterfaceMessage::ToolCallComplete(id)

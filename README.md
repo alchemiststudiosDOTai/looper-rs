@@ -85,6 +85,7 @@ Both `Looper` and `LooperStream` share these builder methods:
 | Method | Description |
 |---|---|
 | `.interface_sender(Sender)` | Channel for UI events |
+| `.user_response_receiver(Receiver)` | Channel for UI to send `ask_user_question` responses back to the handler |
 | `.buffered_output()` | Smooth char-by-char text rendering instead of raw deltas |
 
 ### Supported Handlers Examples

@@ -22,12 +22,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
     let agent_tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
 
-    let agent_looper = Looper::builder(Handlers::OpenAIResponses("gpt-5.4"))
+    let agent_looper = Looper::builder(Handlers::OpenAIResponses("gpt-5-mini"))
         .tools(agent_tools)
         .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.")
         .build().await?;
 
-    let mut looper = Looper::builder(Handlers::OpenAIResponses("gpt-5.4"))
+    let mut looper = Looper::builder(Handlers::OpenAIResponses("gpt-5-mini"))
         .tools(tools)
         .sub_agent(agent_looper)
         .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.")
