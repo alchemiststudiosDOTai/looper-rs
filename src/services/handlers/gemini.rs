@@ -163,8 +163,10 @@ impl GeminiHandler {
                     });
                 }
             } else if !exclusive_names.is_empty() {
-                let (fc, _thought_sig, tool_id) =
-                    function_calls.into_iter().next().expect("function call missing");
+                let (fc, _thought_sig, tool_id) = function_calls
+                    .into_iter()
+                    .next()
+                    .expect("function call missing");
                 let tcr = HandlerToLooperToolCallRequest {
                     id: tool_id.clone(),
                     name: fc.name.clone(),
@@ -175,7 +177,9 @@ impl GeminiHandler {
                     .send(HandlerToLooperMessage::ToolCallRequest(tcr))
                     .await?;
 
-                let result = tools_runner.run_tool(fc.name.clone(), fc.args.clone()).await;
+                let result = tools_runner
+                    .run_tool(fc.name.clone(), fc.args.clone())
+                    .await;
 
                 self.sender
                     .send(HandlerToLooperMessage::ToolCallComplete(tool_id))

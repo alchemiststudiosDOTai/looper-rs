@@ -143,9 +143,14 @@ impl GeminiNonStreamingHandler {
                     });
                 }
             } else if !exclusive_names.is_empty() {
-                let (fc, _thought_sig) = func_calls.into_iter().next().expect("function call missing");
+                let (fc, _thought_sig) = func_calls
+                    .into_iter()
+                    .next()
+                    .expect("function call missing");
                 let tool_id = uuid::Uuid::new_v4().to_string();
-                let result = tools_runner.run_tool(fc.name.clone(), fc.args.clone()).await;
+                let result = tools_runner
+                    .run_tool(fc.name.clone(), fc.args.clone())
+                    .await;
 
                 tool_call_records.push(ToolCallRecord {
                     id: tool_id,

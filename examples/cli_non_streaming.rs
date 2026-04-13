@@ -52,10 +52,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("[result] {}", tc.result);
             }
 
-            if let Some(text) = &step.text {
-                if result.steps.len() > 1 {
-                    println!("[step {}] {}", i + 1, text);
-                }
+            if let Some(text) = &step.text
+                && result.steps.len() > 1
+            {
+                println!("[step {}] {}", i + 1, text);
             }
         }
 

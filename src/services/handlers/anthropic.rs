@@ -34,7 +34,11 @@ pub struct AnthropicHandler {
 }
 
 impl AnthropicHandler {
-    pub fn new(sender: Sender<HandlerToLooperMessage>, model: &str, system_message: &str) -> Result<Self> {
+    pub fn new(
+        sender: Sender<HandlerToLooperMessage>,
+        model: &str,
+        system_message: &str,
+    ) -> Result<Self> {
         let client = Client::default();
 
         Ok(AnthropicHandler {
@@ -204,7 +208,10 @@ impl AnthropicHandler {
             }
 
             if !exclusive_names.is_empty() {
-                let request = tool_requests.into_iter().next().expect("tool request missing");
+                let request = tool_requests
+                    .into_iter()
+                    .next()
+                    .expect("tool request missing");
                 let result = tools_runner
                     .run_tool(request.name.clone(), request.args.clone())
                     .await;
@@ -233,7 +240,9 @@ impl AnthropicHandler {
             for (index, request) in tool_requests.into_iter().enumerate() {
                 let tr = tools_runner.clone();
                 tool_join_set.spawn(async move {
-                    let result = tr.run_tool(request.name.clone(), request.args.clone()).await;
+                    let result = tr
+                        .run_tool(request.name.clone(), request.args.clone())
+                        .await;
                     (index, result, request)
                 });
             }

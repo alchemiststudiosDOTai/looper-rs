@@ -100,8 +100,10 @@ impl AnthropicNonStreamingHandler {
         let mut tool_call_records = Vec::new();
 
         if !tool_uses.is_empty() {
-            let exclusive_names =
-                exclusive_tool_names(tools_runner.as_ref(), tool_uses.iter().map(|tool| tool.name.as_str()));
+            let exclusive_names = exclusive_tool_names(
+                tools_runner.as_ref(),
+                tool_uses.iter().map(|tool| tool.name.as_str()),
+            );
 
             if !exclusive_names.is_empty() && tool_uses.len() > 1 {
                 let error_result = invalid_exclusive_tool_batch_result(&exclusive_names);

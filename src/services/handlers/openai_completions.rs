@@ -146,7 +146,9 @@ impl OpenAIChatHandler {
 
             let exclusive_names = exclusive_tool_names(
                 tools_runner.as_ref(),
-                tool_calls.iter().map(|tool_call| tool_call.function.name.as_str()),
+                tool_calls
+                    .iter()
+                    .map(|tool_call| tool_call.function.name.as_str()),
             );
 
             if !exclusive_names.is_empty() && tool_calls.len() > 1 {
@@ -164,7 +166,9 @@ impl OpenAIChatHandler {
                         .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
                         .await?;
                     self.sender
-                        .send(HandlerToLooperMessage::ToolCallComplete(tool_call.id.clone()))
+                        .send(HandlerToLooperMessage::ToolCallComplete(
+                            tool_call.id.clone(),
+                        ))
                         .await?;
 
                     self.messages.push(
@@ -196,7 +200,9 @@ impl OpenAIChatHandler {
                     .await;
 
                 self.sender
-                    .send(HandlerToLooperMessage::ToolCallComplete(tool_call.id.clone()))
+                    .send(HandlerToLooperMessage::ToolCallComplete(
+                        tool_call.id.clone(),
+                    ))
                     .await?;
 
                 self.messages.push(

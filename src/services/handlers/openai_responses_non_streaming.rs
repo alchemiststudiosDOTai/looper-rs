@@ -141,7 +141,10 @@ impl OpenAIResponsesNonStreamingHandler {
                     )));
                 }
             } else if !exclusive_names.is_empty() {
-                let fc = function_calls.into_iter().next().expect("function call missing");
+                let fc = function_calls
+                    .into_iter()
+                    .next()
+                    .expect("function call missing");
                 let args: serde_json::Value =
                     serde_json::from_str(&fc.arguments).unwrap_or_default();
                 let result = tools_runner.run_tool(fc.name.clone(), args.clone()).await;

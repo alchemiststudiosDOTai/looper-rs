@@ -41,7 +41,9 @@ fn parse_tool_call_args(raw: &str) -> Value {
 fn tool_call_name(tool_call: &ChatCompletionMessageToolCalls) -> &str {
     match tool_call {
         ChatCompletionMessageToolCalls::Function(func_call) => func_call.function.name.as_str(),
-        ChatCompletionMessageToolCalls::Custom(custom_call) => custom_call.custom_tool.name.as_str(),
+        ChatCompletionMessageToolCalls::Custom(custom_call) => {
+            custom_call.custom_tool.name.as_str()
+        }
     }
 }
 
@@ -149,7 +151,10 @@ impl OpenAINonStreamingChatHandler {
                     );
                 }
             } else if !exclusive_names.is_empty() {
-                let tool_call = tool_calls_list.into_iter().next().expect("tool call missing");
+                let tool_call = tool_calls_list
+                    .into_iter()
+                    .next()
+                    .expect("tool call missing");
                 let (tool_call_id, tool_name, args) = into_tool_call_parts(tool_call);
                 let result = tools_runner.run_tool(tool_name.clone(), args.clone()).await;
 
@@ -196,7 +201,8 @@ impl OpenAINonStreamingChatHandler {
                     }
                 }
 
-                for (result, tool_call_id, tool_name, args) in ordered_results.into_iter().flatten() {
+                for (result, tool_call_id, tool_name, args) in ordered_results.into_iter().flatten()
+                {
                     tool_call_records.push(ToolCallRecord {
                         id: tool_call_id.clone(),
                         name: tool_name,

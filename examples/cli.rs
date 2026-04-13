@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     error::Error,
     io::{self, Write},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
     let agent_tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
     let (ask_user_tx, mut ask_user_rx) = tokio::sync::mpsc::channel(1);
+    let active_spinner = Arc::new(StdMutex::new(None::<ProgressBar>));
 
     // NOTE: For now, agent_looper doesn't need to stream tokens since the user
     // doesn't directly see its token stream anyway.
@@ -55,8 +56,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .build()
             .await?;
 
+    let ask_user_spinner = active_spinner.clone();
     tokio::spawn(async move {
         while let Some(request) = ask_user_rx.recv().await {
+            if let Ok(mut spinner) = ask_user_spinner.lock() {
+                if let Some(sp) = spinner.take() {
+                    sp.finish_and_clear();
+                }
+            }
+
             println!("\n[user input required] {}", request.question);
             if !request.options.is_empty() {
                 println!("options: {}", request.options.join(", "));
@@ -84,13 +92,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let turn_done = Arc::new(Notify::new());
     let turn_done_tx = turn_done.clone();
 
+    let ui_spinner = active_spinner.clone();
     tokio::spawn(async move {
         let theme = Theme::default();
-        let mut spinner: Option<ProgressBar> = None;
 
         while let Some(message) = ui_rx.recv().await {
-            if let Some(sp) = spinner.take() {
-                sp.finish_and_clear();
+            if let Ok(mut spinner) = ui_spinner.lock() {
+                if let Some(sp) = spinner.take() {
+                    sp.finish_and_clear();
+                }
             }
 
             match message {
@@ -106,7 +116,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!();
                 }
                 LooperToInterfaceMessage::ToolCall(name) => {
-                    spinner = Some(theme.tool_spinner(&name));
+                    if let Ok(mut spinner) = ui_spinner.lock() {
+                        *spinner = Some(theme.tool_spinner(&name));
+                    }
                 }
                 LooperToInterfaceMessage::ToolCallPending(_id) => {
                     // TODO: Implement intelligent swap of tool calls based on id

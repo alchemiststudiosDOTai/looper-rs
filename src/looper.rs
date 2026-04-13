@@ -70,13 +70,13 @@ impl<'a> LooperBuilder<'a> {
         let mut tool_set = CompositeToolSet::new(self.tools.take());
 
         if let Some(sub_agent) = self.sub_agent.take() {
-            tool_set.add_tool(Arc::new(SubAgentTool::new(sub_agent))).await;
+            tool_set
+                .add_tool(Arc::new(SubAgentTool::new(sub_agent)))
+                .await;
         }
 
         if let Some(channel) = self.ask_user_channel.take() {
-            tool_set
-                .add_tool(Arc::new(AskUserTool::new(channel)))
-                .await;
+            tool_set.add_tool(Arc::new(AskUserTool::new(channel))).await;
         }
 
         let tool_definitions = tool_set.get_tools().await;
