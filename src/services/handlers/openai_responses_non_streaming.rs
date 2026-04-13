@@ -19,7 +19,7 @@ use anyhow::Result;
 use tokio::task::JoinSet;
 
 use crate::{
-    services::ChatHandler,
+    services::{ChatHandler, handlers::tool_policy::*},
     tools::LooperTools,
     types::{
         LooperToolDefinition, MessageHistory,
@@ -76,7 +76,6 @@ impl OpenAIResponsesNonStreamingHandler {
         let request = builder.build()?;
         let response = self.client.responses().create(request).await?;
 
-        // Update previous_response_id for conversation continuity
         self.previous_response_id = Some(response.id.clone());
 
         let mut thinking = Vec::new();
@@ -109,50 +108,105 @@ impl OpenAIResponsesNonStreamingHandler {
             }
         }
 
-        // Execute tool calls if any
         let mut tool_call_records = Vec::new();
 
         if !function_calls.is_empty() {
+            let exclusive_names = exclusive_tool_names(
+                tools_runner.as_ref(),
+                function_calls.iter().map(|call| call.name.as_str()),
+            );
             let mut input_items: Vec<InputItem> = Vec::new();
-            let tr = tools_runner.clone();
-            let mut tool_join_set = JoinSet::new();
 
-            for fc in function_calls {
-                let tr = tr.clone();
-                tool_join_set.spawn(async move {
+            if !exclusive_names.is_empty() && function_calls.len() > 1 {
+                let error_result = invalid_exclusive_tool_batch_result(&exclusive_names);
+
+                for fc in function_calls {
                     let args: serde_json::Value =
                         serde_json::from_str(&fc.arguments).unwrap_or_default();
-                    let result = tr.run_tool(fc.name.clone(), args.clone()).await;
 
-                    (result, fc, args)
+                    tool_call_records.push(ToolCallRecord {
+                        id: fc.call_id.clone(),
+                        name: fc.name.clone(),
+                        args,
+                        result: error_result.clone(),
+                    });
+
+                    input_items.push(InputItem::Item(Item::FunctionCallOutput(
+                        FunctionCallOutputItemParam {
+                            call_id: fc.call_id,
+                            output: FunctionCallOutput::Text(error_result.to_string()),
+                            id: None,
+                            status: None,
+                        },
+                    )));
+                }
+            } else if !exclusive_names.is_empty() {
+                let fc = function_calls.into_iter().next().expect("function call missing");
+                let args: serde_json::Value =
+                    serde_json::from_str(&fc.arguments).unwrap_or_default();
+                let result = tools_runner.run_tool(fc.name.clone(), args.clone()).await;
+
+                tool_call_records.push(ToolCallRecord {
+                    id: fc.call_id.clone(),
+                    name: fc.name.clone(),
+                    args,
+                    result: result.clone(),
                 });
-            }
 
-            while let Some(result) = tool_join_set.join_next().await {
-                match result {
-                    Ok((result, fc, args)) => {
-                        tool_call_records.push(ToolCallRecord {
-                            id: fc.call_id.clone(),
-                            name: fc.name.clone(),
-                            args,
-                            result: result.clone(),
-                        });
+                input_items.push(InputItem::Item(Item::FunctionCallOutput(
+                    FunctionCallOutputItemParam {
+                        call_id: fc.call_id,
+                        output: FunctionCallOutput::Text(result.to_string()),
+                        id: None,
+                        status: None,
+                    },
+                )));
+            } else {
+                let mut tool_join_set = JoinSet::new();
+                let mut ordered_results = Vec::new();
+                ordered_results.resize_with(function_calls.len(), || None);
 
-                        input_items.push(InputItem::Item(Item::FunctionCallOutput(
-                            FunctionCallOutputItemParam {
-                                call_id: fc.call_id.clone(),
-                                output: FunctionCallOutput::Text(result.to_string()),
-                                id: None,
-                                status: None,
-                            },
-                        )));
+                for (index, fc) in function_calls.into_iter().enumerate() {
+                    let tr = tools_runner.clone();
+                    tool_join_set.spawn(async move {
+                        let args: serde_json::Value =
+                            serde_json::from_str(&fc.arguments).unwrap_or_default();
+                        let result = tr.run_tool(fc.name.clone(), args.clone()).await;
+
+                        (index, result, fc, args)
+                    });
+                }
+
+                while let Some(result) = tool_join_set.join_next().await {
+                    match result {
+                        Ok((index, result, fc, args)) => {
+                            ordered_results[index] = Some((result, fc, args));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Join Error occured when collecting tool call results | Error: {}",
+                                e
+                            );
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Join Error occured when collecting tool call results | Error: {}",
-                            e
-                        );
-                    }
+                }
+
+                for (result, fc, args) in ordered_results.into_iter().flatten() {
+                    tool_call_records.push(ToolCallRecord {
+                        id: fc.call_id.clone(),
+                        name: fc.name.clone(),
+                        args,
+                        result: result.clone(),
+                    });
+
+                    input_items.push(InputItem::Item(Item::FunctionCallOutput(
+                        FunctionCallOutputItemParam {
+                            call_id: fc.call_id,
+                            output: FunctionCallOutput::Text(result.to_string()),
+                            id: None,
+                            status: None,
+                        },
+                    )));
                 }
             }
 
@@ -162,7 +216,6 @@ impl OpenAIResponsesNonStreamingHandler {
                 tool_calls: tool_call_records,
             });
 
-            // Recurse with tool results
             return self
                 .inner_send_message(Some(InputParam::Items(input_items)), tools_runner, steps)
                 .await;

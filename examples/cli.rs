@@ -16,7 +16,7 @@ use looper::{
     looper::Looper,
     looper_stream::LooperStream,
     tools::{LooperTool, LooperTools},
-    types::{Handlers, LooperToInterfaceMessage, LooperToolDefinition},
+    types::{AskUserResponse, Handlers, LooperToInterfaceMessage, LooperToolDefinition},
 };
 
 #[tokio::main]
@@ -28,24 +28,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
     let agent_tools: Box<dyn LooperTools> = Box::new(ToolSet::new());
+    let (ask_user_tx, mut ask_user_rx) = tokio::sync::mpsc::channel(1);
 
     // NOTE: For now, agent_looper doesn't need to stream tokens since the user
-    // doesn't directly see it's token stream anyway. Might as well just leave it
-    // as non-streaming, unless there is obviously value to changing this.
-    let agent_looper = Looper::builder(Handlers::Gemini("gemini-3-flash-preview"))
+    // doesn't directly see its token stream anyway.
+    let agent_looper = Looper::builder(Handlers::OpenAIResponses("gpt-5.4-mini"))
         .tools(agent_tools)
-        .instructions("
+        .instructions(
+            "
             You are an agent researching specific tasks for another agent that is invoking you.
             Report back with concise and clear findings since the agent invoking you will rely on this information.
-        ")
-        .build().await?;
+        ",
+        )
+        .build()
+        .await?;
 
-    let (mut looper, mut ui_rx) = LooperStream::builder(Handlers::Gemini("gemini-3-flash-preview"))
-        .sub_agent(agent_looper)
-        .tools(tools)
-        .instructions("You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.")
-        .buffered_output()
-        .build().await?;
+    let (mut looper, mut ui_rx) =
+        LooperStream::builder(Handlers::OpenAIResponses("gpt-5.4-mini"))
+            .sub_agent(agent_looper)
+            .tools(tools)
+            .ask_user_channel(ask_user_tx)
+            .instructions(
+                "You're being used as a CLI example for an agent loop. Be succinct yet friendly and helpful.",
+            )
+            .buffered_output()
+            .build()
+            .await?;
+
+    tokio::spawn(async move {
+        while let Some(request) = ask_user_rx.recv().await {
+            println!("\n[user input required] {}", request.question);
+            if !request.options.is_empty() {
+                println!("options: {}", request.options.join(", "));
+            }
+            print!("> ");
+            io::stdout().flush().ok();
+
+            let answer = tokio::task::spawn_blocking(|| {
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                Ok::<String, io::Error>(input)
+            })
+            .await;
+
+            let answer = match answer {
+                Ok(Ok(input)) => input.trim().to_string(),
+                Ok(Err(err)) => format!("Failed to read user input: {}", err),
+                Err(err) => format!("Ask-user task failed: {}", err),
+            };
+
+            let _ = request.response_tx.send(AskUserResponse { answer });
+        }
+    });
 
     let turn_done = Arc::new(Notify::new());
     let turn_done_tx = turn_done.clone();

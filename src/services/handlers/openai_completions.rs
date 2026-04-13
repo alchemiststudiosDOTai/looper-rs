@@ -17,12 +17,11 @@ use async_trait::async_trait;
 
 use anyhow::Result;
 use futures::StreamExt;
+use serde_json::Value;
 use tokio::task::JoinSet;
 
-use serde_json::Value;
-
 use crate::{
-    services::StreamingChatHandler,
+    services::{StreamingChatHandler, handlers::tool_policy::*},
     tools::LooperTools,
     types::{
         HandlerToLooperMessage, HandlerToLooperToolCallRequest, LooperToolDefinition,
@@ -50,15 +49,12 @@ impl OpenAIChatHandler {
             .build()?
             .into();
 
-        let messages = vec![system_message];
-        let tools = Vec::new();
-
         Ok(OpenAIChatHandler {
             client,
             model: model.to_string(),
-            messages,
+            messages: vec![system_message],
             sender,
-            tools,
+            tools: Vec::new(),
         })
     }
 
@@ -75,27 +71,22 @@ impl OpenAIChatHandler {
         let mut stream = self.client.chat().create_stream(request).await?;
         let mut assistant_res_buf = Vec::new();
         let mut tool_calls: Vec<ChatCompletionMessageToolCall> = Vec::new();
-        let mut tool_join_set = JoinSet::new();
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(response) => {
                     for choice in response.choices.into_iter() {
-                        // handle text chunk
                         if let Some(content) = choice.delta.content {
                             assistant_res_buf.push(content.clone());
                             self.sender
                                 .send(HandlerToLooperMessage::Assistant(content))
-                                .await
-                                .unwrap();
+                                .await?;
                         }
 
-                        // handle tool call chunks
                         if let Some(tool_call_chunks) = choice.delta.tool_calls {
                             for chunk in tool_call_chunks {
                                 let index = chunk.index as usize;
 
-                                // Ensure we have enough space in the vector
                                 while tool_calls.len() <= index {
                                     tool_calls.push(ChatCompletionMessageToolCall {
                                         id: String::new(),
@@ -103,7 +94,6 @@ impl OpenAIChatHandler {
                                     });
                                 }
 
-                                // Update the tool call with chunk data
                                 let tool_call = &mut tool_calls[index];
                                 if let Some(id) = chunk.id {
                                     tool_call.id = id;
@@ -125,32 +115,8 @@ impl OpenAIChatHandler {
                             }
                         }
 
-                        // When tool calls are complete, spawn parallel execution
                         if matches!(choice.finish_reason, Some(FinishReason::ToolCalls)) {
-                            for tool_call in tool_calls.iter() {
-                                let tcr = HandlerToLooperToolCallRequest {
-                                    id: tool_call.id.clone(),
-                                    name: tool_call.function.name.clone(),
-                                    args: serde_json::from_str(&tool_call.function.arguments)
-                                        .unwrap_or_default(),
-                                };
-
-                                self.sender
-                                    .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
-                                    .await?;
-
-                                let tr = tools_runner.clone();
-                                let tc_id = tool_call.id.clone();
-                                let tc_name = tool_call.function.name.clone();
-                                let tc_args: Value =
-                                    serde_json::from_str(&tool_call.function.arguments)
-                                        .unwrap_or_default();
-
-                                tool_join_set.spawn(async move {
-                                    let result = tr.run_tool(tc_name, tc_args).await;
-                                    (tc_id, result)
-                                });
-                            }
+                            // fully assembled tool calls are processed after the stream closes
                         }
                     }
                 }
@@ -160,37 +126,126 @@ impl OpenAIChatHandler {
             }
         }
 
-        // Wait for all tool call executions to complete
-        if !tool_join_set.is_empty() {
-            // Add assistant message with tool calls
+        if !tool_calls.is_empty() {
+            let assistant_text = assistant_res_buf.join("");
             let assistant_tool_calls: Vec<ChatCompletionMessageToolCalls> =
-                tool_calls.iter().map(|tc| tc.clone().into()).collect();
+                tool_calls.iter().cloned().map(Into::into).collect();
 
             self.messages.push(
                 ChatCompletionRequestAssistantMessage {
-                    content: None,
+                    content: if assistant_text.is_empty() {
+                        None
+                    } else {
+                        Some(assistant_text.clone().into())
+                    },
                     tool_calls: Some(assistant_tool_calls),
                     ..Default::default()
                 }
                 .into(),
             );
 
+            let exclusive_names = exclusive_tool_names(
+                tools_runner.as_ref(),
+                tool_calls.iter().map(|tool_call| tool_call.function.name.as_str()),
+            );
+
+            if !exclusive_names.is_empty() && tool_calls.len() > 1 {
+                let error_result = invalid_exclusive_tool_batch_result(&exclusive_names);
+
+                for tool_call in tool_calls {
+                    let tcr = HandlerToLooperToolCallRequest {
+                        id: tool_call.id.clone(),
+                        name: tool_call.function.name.clone(),
+                        args: serde_json::from_str(&tool_call.function.arguments)
+                            .unwrap_or_default(),
+                    };
+
+                    self.sender
+                        .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
+                        .await?;
+                    self.sender
+                        .send(HandlerToLooperMessage::ToolCallComplete(tool_call.id.clone()))
+                        .await?;
+
+                    self.messages.push(
+                        ChatCompletionRequestToolMessage {
+                            content: error_result.to_string().into(),
+                            tool_call_id: tool_call.id,
+                        }
+                        .into(),
+                    );
+                }
+
+                return self.inner_send_message(tools_runner).await;
+            }
+
+            if !exclusive_names.is_empty() {
+                let tool_call = tool_calls.into_iter().next().expect("tool call missing");
+                let tcr = HandlerToLooperToolCallRequest {
+                    id: tool_call.id.clone(),
+                    name: tool_call.function.name.clone(),
+                    args: serde_json::from_str(&tool_call.function.arguments).unwrap_or_default(),
+                };
+
+                self.sender
+                    .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
+                    .await?;
+
+                let result = tools_runner
+                    .run_tool(tcr.name.clone(), tcr.args.clone())
+                    .await;
+
+                self.sender
+                    .send(HandlerToLooperMessage::ToolCallComplete(tool_call.id.clone()))
+                    .await?;
+
+                self.messages.push(
+                    ChatCompletionRequestToolMessage {
+                        content: result.to_string().into(),
+                        tool_call_id: tool_call.id,
+                    }
+                    .into(),
+                );
+
+                return self.inner_send_message(tools_runner).await;
+            }
+
+            let mut tool_join_set = JoinSet::new();
+            let mut ordered_results = Vec::new();
+            ordered_results.resize_with(tool_calls.len(), || None);
+
+            for (index, tool_call) in tool_calls.into_iter().enumerate() {
+                let tcr = HandlerToLooperToolCallRequest {
+                    id: tool_call.id.clone(),
+                    name: tool_call.function.name.clone(),
+                    args: serde_json::from_str(&tool_call.function.arguments).unwrap_or_default(),
+                };
+
+                self.sender
+                    .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
+                    .await?;
+
+                let tr = tools_runner.clone();
+                let tc_id = tool_call.id.clone();
+                let tc_name = tool_call.function.name.clone();
+                let tc_args: Value =
+                    serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
+
+                tool_join_set.spawn(async move {
+                    let result = tr.run_tool(tc_name, tc_args).await;
+                    (index, tc_id, result)
+                });
+            }
+
             while let Some(result) = tool_join_set.join_next().await {
                 match result {
-                    Ok((tool_call_id, response)) => {
+                    Ok((index, tool_call_id, response)) => {
                         self.sender
                             .send(HandlerToLooperMessage::ToolCallComplete(
                                 tool_call_id.clone(),
                             ))
                             .await?;
-
-                        self.messages.push(
-                            ChatCompletionRequestToolMessage {
-                                content: response.to_string().into(),
-                                tool_call_id,
-                            }
-                            .into(),
-                        );
+                        ordered_results[index] = Some((tool_call_id, response));
                     }
                     Err(e) => {
                         eprintln!(
@@ -201,10 +256,31 @@ impl OpenAIChatHandler {
                 }
             }
 
+            for (tool_call_id, response) in ordered_results.into_iter().flatten() {
+                self.messages.push(
+                    ChatCompletionRequestToolMessage {
+                        content: response.to_string().into(),
+                        tool_call_id,
+                    }
+                    .into(),
+                );
+            }
+
             return self.inner_send_message(tools_runner).await;
         }
 
-        Ok(assistant_res_buf.join(""))
+        let assistant_text = assistant_res_buf.join("");
+        if !assistant_text.is_empty() {
+            self.messages.push(
+                ChatCompletionRequestAssistantMessage {
+                    content: Some(assistant_text.clone().into()),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+
+        Ok(assistant_text)
     }
 }
 
@@ -240,11 +316,9 @@ impl StreamingChatHandler for OpenAIChatHandler {
     }
 
     fn set_tools(&mut self, tools: Vec<LooperToolDefinition>) {
-        let tools = tools
+        self.tools = tools
             .into_iter()
             .map(|t| ChatCompletionTools::Function(t.into()))
-            .collect::<Vec<ChatCompletionTools>>();
-
-        self.tools = tools;
+            .collect();
     }
 }

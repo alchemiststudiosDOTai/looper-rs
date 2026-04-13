@@ -1,3 +1,9 @@
+pub mod ask_user;
+pub use ask_user::*;
+
+pub mod composite;
+pub use composite::*;
+
 pub mod sub_agent;
 pub use sub_agent::*;
 
@@ -9,13 +15,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::types::LooperToolDefinition;
+use crate::types::{LooperToolDefinition, ToolExecutionMode};
 
 #[async_trait]
 pub trait LooperTool: Send + Sync {
     async fn execute(&mut self, args: &Value) -> Value;
     fn tool(&self) -> LooperToolDefinition;
     fn get_tool_name(&self) -> String;
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Parallel
+    }
 }
 
 #[async_trait]
@@ -23,4 +32,8 @@ pub trait LooperTools: Send + Sync {
     async fn get_tools(&self) -> Vec<LooperToolDefinition>;
     async fn add_tool(&mut self, tool: Arc<dyn LooperTool>);
     async fn run_tool(&self, name: String, args: Value) -> Value;
+
+    fn get_tool_execution_mode(&self, _name: &str) -> ToolExecutionMode {
+        ToolExecutionMode::Parallel
+    }
 }

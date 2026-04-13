@@ -13,8 +13,8 @@ use crate::{
             openai_responses_non_streaming::OpenAIResponsesNonStreamingHandler,
         },
     },
-    tools::{EmptyToolSet, LooperTools, SubAgentTool},
-    types::{Handlers, MessageHistory, turn::TurnResult},
+    tools::{AskUserTool, CompositeToolSet, LooperTools, SubAgentTool},
+    types::{AskUserSender, Handlers, MessageHistory, turn::TurnResult},
 };
 
 pub struct Looper {
@@ -29,6 +29,7 @@ pub struct LooperBuilder<'a> {
     tools: Option<Box<dyn LooperTools>>,
     instructions: Option<String>,
     sub_agent: Option<Looper>,
+    ask_user_channel: Option<AskUserSender>,
 }
 
 impl<'a> LooperBuilder<'a> {
@@ -57,88 +58,85 @@ impl<'a> LooperBuilder<'a> {
         self
     }
 
+    pub fn ask_user_channel(mut self, channel: AskUserSender) -> Self {
+        self.ask_user_channel = Some(channel);
+        self
+    }
+
     pub async fn build(mut self) -> Result<Looper> {
         let sub_agent_enabled = self.sub_agent.is_some();
+        let ask_user_enabled = self.ask_user_channel.is_some();
+
+        let mut tool_set = CompositeToolSet::new(self.tools.take());
+
+        if let Some(sub_agent) = self.sub_agent.take() {
+            tool_set.add_tool(Arc::new(SubAgentTool::new(sub_agent))).await;
+        }
+
+        if let Some(channel) = self.ask_user_channel.take() {
+            tool_set
+                .add_tool(Arc::new(AskUserTool::new(channel)))
+                .await;
+        }
+
+        let tool_definitions = tool_set.get_tools().await;
 
         let handler: Box<dyn ChatHandler> = match self.handler_type {
             Handlers::Anthropic(m) => {
                 let mut handler = AnthropicNonStreamingHandler::new(
                     m,
-                    &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                    &get_system_message(
+                        self.instructions.as_deref(),
+                        sub_agent_enabled,
+                        ask_user_enabled,
+                    )?,
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::OpenAICompletions(m) => {
                 let mut handler = OpenAINonStreamingChatHandler::new(
                     m,
-                    &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                    &get_system_message(
+                        self.instructions.as_deref(),
+                        sub_agent_enabled,
+                        ask_user_enabled,
+                    )?,
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::OpenAIResponses(m) => {
                 let mut handler = OpenAIResponsesNonStreamingHandler::new(
                     m,
-                    &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                    &get_system_message(
+                        self.instructions.as_deref(),
+                        sub_agent_enabled,
+                        ask_user_enabled,
+                    )?,
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::Gemini(m) => {
                 let mut handler = GeminiNonStreamingHandler::new(
                     m,
-                    &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
+                    &get_system_message(
+                        self.instructions.as_deref(),
+                        sub_agent_enabled,
+                        ask_user_enabled,
+                    )?,
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
         };
 
-        match self.tools {
-            Some(t) => Ok(Looper {
-                handler,
-                message_history: self.message_history,
-                tools: Arc::from(t),
-            }),
-            None => Ok(Looper {
-                handler,
-                message_history: self.message_history,
-                tools: Arc::new(EmptyToolSet),
-            }),
-        }
+        Ok(Looper {
+            handler,
+            message_history: self.message_history,
+            tools: Arc::new(tool_set),
+        })
     }
 }
 
@@ -150,6 +148,7 @@ impl Looper {
             tools: None,
             sub_agent: None,
             instructions: None,
+            ask_user_channel: None,
         }
     }
 
@@ -169,6 +168,7 @@ fn render_system_message(
     template: &str,
     instructions: Option<&str>,
     sub_agent_enabled: bool,
+    ask_user_enabled: bool,
 ) -> Result<String> {
     let mut tera = Tera::default();
     tera.add_raw_template("system_prompt", template)?;
@@ -182,13 +182,22 @@ fn render_system_message(
         ctx.insert("sub_agent", &true);
     }
 
+    if ask_user_enabled {
+        ctx.insert("ask_user", &true);
+    }
+
     Ok(tera.render("system_prompt", &ctx)?)
 }
 
-fn get_system_message(instructions: Option<&str>, sub_agent_enabled: bool) -> Result<String> {
+fn get_system_message(
+    instructions: Option<&str>,
+    sub_agent_enabled: bool,
+    ask_user_enabled: bool,
+) -> Result<String> {
     render_system_message(
         include_str!("../prompts/system_prompt.txt"),
         instructions,
         sub_agent_enabled,
+        ask_user_enabled,
     )
 }

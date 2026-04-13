@@ -9,12 +9,11 @@ use async_trait::async_trait;
 
 use anyhow::Result;
 use futures::TryStreamExt;
-
 use tokio::{sync::mpsc::Sender, task::JoinSet};
 
 use crate::{
     mapping::tools::gemini::to_gemini_tool,
-    services::StreamingChatHandler,
+    services::{StreamingChatHandler, handlers::tool_policy::*},
     tools::LooperTools,
     types::{
         HandlerToLooperMessage, HandlerToLooperToolCallRequest, LooperToolDefinition,
@@ -76,7 +75,6 @@ impl GeminiHandler {
 
         let mut all_text = String::new();
         let mut thinking_text = String::new();
-        // Store function calls with their pre-assigned IDs
         let mut function_calls: Vec<(gemini_rust::FunctionCall, Option<String>, String)> =
             Vec::new();
         let mut had_thinking = false;
@@ -98,7 +96,6 @@ impl GeminiHandler {
                 .await?;
         }
 
-        // Build assistant content parts for message history
         let mut assistant_parts: Vec<Part> = Vec::new();
 
         if !thinking_text.is_empty() {
@@ -117,36 +114,13 @@ impl GeminiHandler {
             });
         }
 
-        // Process function calls
-        let mut tool_join_set = JoinSet::new();
-
-        for (fc, thought_sig, tool_id) in &function_calls {
-            let tcr = HandlerToLooperToolCallRequest {
-                id: tool_id.clone(),
-                name: fc.name.clone(),
-                args: fc.args.clone(),
-            };
-
-            self.sender
-                .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
-                .await?;
-
+        for (fc, thought_sig, _tool_id) in &function_calls {
             assistant_parts.push(Part::FunctionCall {
                 function_call: fc.clone(),
                 thought_signature: thought_sig.clone(),
             });
-
-            let tr = tools_runner.clone();
-            let tool_name = fc.name.clone();
-            let tool_input = fc.args.clone();
-
-            tool_join_set.spawn(async move {
-                let result = tr.run_tool(tool_name, tool_input).await;
-                (result, tcr)
-            });
         }
 
-        // Push assistant message to history
         if !assistant_parts.is_empty() {
             self.messages.push(Message {
                 content: Content {
@@ -157,36 +131,114 @@ impl GeminiHandler {
             });
         }
 
-        // Execute tool calls and collect results
-        if !tool_join_set.is_empty() {
+        if !function_calls.is_empty() {
+            let exclusive_names = exclusive_tool_names(
+                tools_runner.as_ref(),
+                function_calls.iter().map(|(fc, _, _)| fc.name.as_str()),
+            );
             let mut function_response_parts: Vec<Part> = Vec::new();
 
-            while let Some(result) = tool_join_set.join_next().await {
-                match result {
-                    Ok((result, tool_use)) => {
-                        self.sender
-                            .send(HandlerToLooperMessage::ToolCallComplete(
-                                tool_use.id.clone(),
-                            ))
-                            .await?;
+            if !exclusive_names.is_empty() && function_calls.len() > 1 {
+                let error_result = invalid_exclusive_tool_batch_result(&exclusive_names);
 
-                        function_response_parts.push(Part::FunctionResponse {
-                            function_response: FunctionResponse {
-                                name: tool_use.name.clone(),
-                                response: Some(result),
-                            },
-                        });
+                for (fc, _thought_sig, tool_id) in function_calls {
+                    let tcr = HandlerToLooperToolCallRequest {
+                        id: tool_id.clone(),
+                        name: fc.name.clone(),
+                        args: fc.args.clone(),
+                    };
+
+                    self.sender
+                        .send(HandlerToLooperMessage::ToolCallRequest(tcr))
+                        .await?;
+                    self.sender
+                        .send(HandlerToLooperMessage::ToolCallComplete(tool_id))
+                        .await?;
+
+                    function_response_parts.push(Part::FunctionResponse {
+                        function_response: FunctionResponse {
+                            name: fc.name.clone(),
+                            response: Some(error_result.clone()),
+                        },
+                    });
+                }
+            } else if !exclusive_names.is_empty() {
+                let (fc, _thought_sig, tool_id) =
+                    function_calls.into_iter().next().expect("function call missing");
+                let tcr = HandlerToLooperToolCallRequest {
+                    id: tool_id.clone(),
+                    name: fc.name.clone(),
+                    args: fc.args.clone(),
+                };
+
+                self.sender
+                    .send(HandlerToLooperMessage::ToolCallRequest(tcr))
+                    .await?;
+
+                let result = tools_runner.run_tool(fc.name.clone(), fc.args.clone()).await;
+
+                self.sender
+                    .send(HandlerToLooperMessage::ToolCallComplete(tool_id))
+                    .await?;
+
+                function_response_parts.push(Part::FunctionResponse {
+                    function_response: FunctionResponse {
+                        name: fc.name.clone(),
+                        response: Some(result),
+                    },
+                });
+            } else {
+                let mut tool_join_set = JoinSet::new();
+                let mut ordered_results = Vec::new();
+                ordered_results.resize_with(function_calls.len(), || None);
+
+                for (index, (fc, _thought_sig, tool_id)) in function_calls.into_iter().enumerate() {
+                    let tcr = HandlerToLooperToolCallRequest {
+                        id: tool_id.clone(),
+                        name: fc.name.clone(),
+                        args: fc.args.clone(),
+                    };
+
+                    self.sender
+                        .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
+                        .await?;
+
+                    let tr = tools_runner.clone();
+                    tool_join_set.spawn(async move {
+                        let result = tr.run_tool(fc.name.clone(), fc.args.clone()).await;
+                        (index, result, tcr)
+                    });
+                }
+
+                while let Some(result) = tool_join_set.join_next().await {
+                    match result {
+                        Ok((index, result, tool_use)) => {
+                            self.sender
+                                .send(HandlerToLooperMessage::ToolCallComplete(
+                                    tool_use.id.clone(),
+                                ))
+                                .await?;
+                            ordered_results[index] = Some((result, tool_use));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Join Error occured when collecting tool call results | Error: {}",
+                                e
+                            );
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Join Error occured when collecting tool call results | Error: {}",
-                            e
-                        );
-                    }
+                }
+
+                for (result, tool_use) in ordered_results.into_iter().flatten() {
+                    function_response_parts.push(Part::FunctionResponse {
+                        function_response: FunctionResponse {
+                            name: tool_use.name.clone(),
+                            response: Some(result),
+                        },
+                    });
                 }
             }
 
-            // Push function response message to history
             self.messages.push(Message {
                 content: Content {
                     parts: Some(function_response_parts),

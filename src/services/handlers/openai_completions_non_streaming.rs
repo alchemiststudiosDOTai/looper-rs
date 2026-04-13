@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::task::JoinSet;
 
 use crate::{
-    services::ChatHandler,
+    services::{ChatHandler, handlers::tool_policy::*},
     tools::LooperTools,
     types::{
         LooperToolDefinition, MessageHistory,
@@ -32,6 +32,32 @@ pub struct OpenAINonStreamingChatHandler {
     model: String,
     messages: Vec<ChatCompletionRequestMessage>,
     tools: Vec<ChatCompletionTools>,
+}
+
+fn parse_tool_call_args(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+fn tool_call_name(tool_call: &ChatCompletionMessageToolCalls) -> &str {
+    match tool_call {
+        ChatCompletionMessageToolCalls::Function(func_call) => func_call.function.name.as_str(),
+        ChatCompletionMessageToolCalls::Custom(custom_call) => custom_call.custom_tool.name.as_str(),
+    }
+}
+
+fn into_tool_call_parts(tool_call: ChatCompletionMessageToolCalls) -> (String, String, Value) {
+    match tool_call {
+        ChatCompletionMessageToolCalls::Function(func_call) => (
+            func_call.id,
+            func_call.function.name,
+            parse_tool_call_args(&func_call.function.arguments),
+        ),
+        ChatCompletionMessageToolCalls::Custom(custom_call) => (
+            custom_call.id,
+            custom_call.custom_tool.name,
+            parse_tool_call_args(&custom_call.custom_tool.input),
+        ),
+    }
 }
 
 impl OpenAINonStreamingChatHandler {
@@ -85,7 +111,6 @@ impl OpenAINonStreamingChatHandler {
         if has_tool_calls {
             let tool_calls_list = message.tool_calls.clone().unwrap_or_default();
 
-            // Push assistant message with tool calls to history
             self.messages.push(
                 ChatCompletionRequestAssistantMessage {
                     content: message.content.clone().map(|c| c.into()),
@@ -95,53 +120,97 @@ impl OpenAINonStreamingChatHandler {
                 .into(),
             );
 
-            // Execute tool calls in parallel
+            let function_names = tool_calls_list
+                .iter()
+                .map(tool_call_name)
+                .collect::<Vec<_>>();
+            let exclusive_names = exclusive_tool_names(tools_runner.as_ref(), function_names);
             let mut tool_call_records = Vec::new();
-            let tr = tools_runner.clone();
-            let mut tool_join_set = JoinSet::new();
 
-            for tc in tool_calls_list {
-                let ChatCompletionMessageToolCalls::Function(func_call) = tc else {
-                    continue;
-                };
+            if !exclusive_names.is_empty() && tool_calls_list.len() > 1 {
+                let error_result = invalid_exclusive_tool_batch_result(&exclusive_names);
 
-                let tr = tr.clone();
-                tool_join_set.spawn(async move {
-                    let args: Value =
-                        serde_json::from_str(&func_call.function.arguments).unwrap_or_default();
-                    let result = tr
-                        .run_tool(func_call.function.name.clone(), args.clone())
-                        .await;
+                for tool_call in tool_calls_list {
+                    let (tool_call_id, tool_name, args) = into_tool_call_parts(tool_call);
 
-                    (result, func_call, args)
+                    tool_call_records.push(ToolCallRecord {
+                        id: tool_call_id.clone(),
+                        name: tool_name,
+                        args,
+                        result: error_result.clone(),
+                    });
+
+                    self.messages.push(
+                        ChatCompletionRequestToolMessage {
+                            content: error_result.to_string().into(),
+                            tool_call_id,
+                        }
+                        .into(),
+                    );
+                }
+            } else if !exclusive_names.is_empty() {
+                let tool_call = tool_calls_list.into_iter().next().expect("tool call missing");
+                let (tool_call_id, tool_name, args) = into_tool_call_parts(tool_call);
+                let result = tools_runner.run_tool(tool_name.clone(), args.clone()).await;
+
+                tool_call_records.push(ToolCallRecord {
+                    id: tool_call_id.clone(),
+                    name: tool_name,
+                    args,
+                    result: result.clone(),
                 });
-            }
 
-            while let Some(result) = tool_join_set.join_next().await {
-                match result {
-                    Ok((result, func_call, args)) => {
-                        tool_call_records.push(ToolCallRecord {
-                            id: func_call.id.clone(),
-                            name: func_call.function.name.clone(),
-                            args,
-                            result: result.clone(),
-                        });
+                self.messages.push(
+                    ChatCompletionRequestToolMessage {
+                        content: result.to_string().into(),
+                        tool_call_id,
+                    }
+                    .into(),
+                );
+            } else {
+                let mut tool_join_set = JoinSet::new();
+                let mut ordered_results = Vec::new();
+                ordered_results.resize_with(tool_calls_list.len(), || None);
 
-                        // Push tool result message to history
-                        self.messages.push(
-                            ChatCompletionRequestToolMessage {
-                                content: result.to_string().into(),
-                                tool_call_id: func_call.id.clone(),
-                            }
-                            .into(),
-                        );
+                for (index, tool_call) in tool_calls_list.into_iter().enumerate() {
+                    let (tool_call_id, tool_name, args) = into_tool_call_parts(tool_call);
+                    let tr = tools_runner.clone();
+
+                    tool_join_set.spawn(async move {
+                        let result = tr.run_tool(tool_name.clone(), args.clone()).await;
+                        (index, result, tool_call_id, tool_name, args)
+                    });
+                }
+
+                while let Some(result) = tool_join_set.join_next().await {
+                    match result {
+                        Ok((index, result, tool_call_id, tool_name, args)) => {
+                            ordered_results[index] = Some((result, tool_call_id, tool_name, args));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Join Error occured when collecting tool call results | Error: {}",
+                                e
+                            );
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Join Error occured when collecting tool call results | Error: {}",
-                            e
-                        );
-                    }
+                }
+
+                for (result, tool_call_id, tool_name, args) in ordered_results.into_iter().flatten() {
+                    tool_call_records.push(ToolCallRecord {
+                        id: tool_call_id.clone(),
+                        name: tool_name,
+                        args,
+                        result: result.clone(),
+                    });
+
+                    self.messages.push(
+                        ChatCompletionRequestToolMessage {
+                            content: result.to_string().into(),
+                            tool_call_id,
+                        }
+                        .into(),
+                    );
                 }
             }
 
@@ -151,12 +220,9 @@ impl OpenAINonStreamingChatHandler {
                 tool_calls: tool_call_records,
             });
 
-            // Recurse to handle follow-up
             return self.inner_send_message(tools_runner, steps).await;
         }
 
-        // No tool calls — final response
-        // Push assistant message to history
         if let Some(ref content) = text {
             let assistant_msg = ChatCompletionRequestAssistantMessage {
                 content: Some(content.clone().into()),

@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 
 use crate::{
     mapping::tools::gemini::to_gemini_tool,
-    services::ChatHandler,
+    services::{ChatHandler, handlers::tool_policy::*},
     tools::LooperTools,
     types::{
         LooperToolDefinition, MessageHistory,
@@ -104,7 +104,6 @@ impl GeminiNonStreamingHandler {
             }
         }
 
-        // Push assistant message to history
         if !assistant_parts.is_empty() {
             self.messages.push(Message {
                 content: Content {
@@ -115,51 +114,97 @@ impl GeminiNonStreamingHandler {
             });
         }
 
-        // Execute tool calls if any
         let mut tool_call_records = Vec::new();
 
         if !func_calls.is_empty() {
-            let tr = tools_runner.clone();
-            let mut tool_join_set = JoinSet::new();
-
-            for (fc, _thought_sig) in func_calls {
-                let tr = tr.clone();
-                let tool_id = uuid::Uuid::new_v4().to_string();
-                tool_join_set.spawn(async move {
-                    let result = tr.run_tool(fc.name.clone(), fc.args.clone()).await;
-                    (result, fc, tool_id)
-                });
-            }
-
+            let exclusive_names = exclusive_tool_names(
+                tools_runner.as_ref(),
+                func_calls.iter().map(|(fc, _)| fc.name.as_str()),
+            );
             let mut function_response_parts: Vec<Part> = Vec::new();
 
-            while let Some(result) = tool_join_set.join_next().await {
-                match result {
-                    Ok((result, fc, tool_id)) => {
-                        tool_call_records.push(ToolCallRecord {
-                            id: tool_id,
-                            name: fc.name.clone(),
-                            args: fc.args.clone(),
-                            result: result.clone(),
-                        });
+            if !exclusive_names.is_empty() && func_calls.len() > 1 {
+                let error_result = invalid_exclusive_tool_batch_result(&exclusive_names);
 
-                        function_response_parts.push(Part::FunctionResponse {
-                            function_response: FunctionResponse {
-                                name: fc.name.clone(),
-                                response: Some(result),
-                            },
-                        });
+                for (fc, _thought_sig) in func_calls {
+                    let tool_id = uuid::Uuid::new_v4().to_string();
+                    tool_call_records.push(ToolCallRecord {
+                        id: tool_id,
+                        name: fc.name.clone(),
+                        args: fc.args.clone(),
+                        result: error_result.clone(),
+                    });
+
+                    function_response_parts.push(Part::FunctionResponse {
+                        function_response: FunctionResponse {
+                            name: fc.name.clone(),
+                            response: Some(error_result.clone()),
+                        },
+                    });
+                }
+            } else if !exclusive_names.is_empty() {
+                let (fc, _thought_sig) = func_calls.into_iter().next().expect("function call missing");
+                let tool_id = uuid::Uuid::new_v4().to_string();
+                let result = tools_runner.run_tool(fc.name.clone(), fc.args.clone()).await;
+
+                tool_call_records.push(ToolCallRecord {
+                    id: tool_id,
+                    name: fc.name.clone(),
+                    args: fc.args.clone(),
+                    result: result.clone(),
+                });
+
+                function_response_parts.push(Part::FunctionResponse {
+                    function_response: FunctionResponse {
+                        name: fc.name.clone(),
+                        response: Some(result),
+                    },
+                });
+            } else {
+                let mut tool_join_set = JoinSet::new();
+                let mut ordered_results = Vec::new();
+                ordered_results.resize_with(func_calls.len(), || None);
+
+                for (index, (fc, _thought_sig)) in func_calls.into_iter().enumerate() {
+                    let tr = tools_runner.clone();
+                    let tool_id = uuid::Uuid::new_v4().to_string();
+                    tool_join_set.spawn(async move {
+                        let result = tr.run_tool(fc.name.clone(), fc.args.clone()).await;
+                        (index, result, fc, tool_id)
+                    });
+                }
+
+                while let Some(result) = tool_join_set.join_next().await {
+                    match result {
+                        Ok((index, result, fc, tool_id)) => {
+                            ordered_results[index] = Some((result, fc, tool_id));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Join Error occured when collecting tool call results | Error: {}",
+                                e
+                            );
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Join Error occured when collecting tool call results | Error: {}",
-                            e
-                        );
-                    }
+                }
+
+                for (result, fc, tool_id) in ordered_results.into_iter().flatten() {
+                    tool_call_records.push(ToolCallRecord {
+                        id: tool_id,
+                        name: fc.name.clone(),
+                        args: fc.args.clone(),
+                        result: result.clone(),
+                    });
+
+                    function_response_parts.push(Part::FunctionResponse {
+                        function_response: FunctionResponse {
+                            name: fc.name.clone(),
+                            response: Some(result),
+                        },
+                    });
                 }
             }
 
-            // Push function response message to history
             self.messages.push(Message {
                 content: Content {
                     parts: Some(function_response_parts),
@@ -174,8 +219,7 @@ impl GeminiNonStreamingHandler {
                 tool_calls: tool_call_records,
             });
 
-            // Recurse to handle follow-up
-            return self.inner_send_message(tr, steps).await;
+            return self.inner_send_message(tools_runner, steps).await;
         }
 
         steps.push(TurnStep {

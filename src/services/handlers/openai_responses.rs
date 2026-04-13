@@ -22,7 +22,7 @@ use serde_json::Value;
 use tokio::task::JoinSet;
 
 use crate::{
-    services::StreamingChatHandler,
+    services::{StreamingChatHandler, handlers::tool_policy::*},
     tools::LooperTools,
     types::{
         HandlerToLooperMessage, HandlerToLooperToolCallRequest, LooperToolDefinition,
@@ -86,7 +86,6 @@ impl OpenAIResponsesHandler {
 
         let mut assistant_res_buf = Vec::new();
         let mut function_calls: Vec<FunctionToolCall> = Vec::new();
-        let mut tool_join_set = JoinSet::new();
         let mut response_id: Option<String> = None;
 
         while let Some(event) = stream.next().await {
@@ -125,17 +124,8 @@ impl OpenAIResponsesHandler {
                         };
 
                         self.sender
-                            .send(HandlerToLooperMessage::ToolCallRequest(tcr.clone()))
+                            .send(HandlerToLooperMessage::ToolCallRequest(tcr))
                             .await?;
-
-                        let tr = tools_runner.clone();
-                        let fc_clone = fc.clone();
-                        tool_join_set.spawn(async move {
-                            let args: Value =
-                                serde_json::from_str(&fc_clone.arguments).unwrap_or_default();
-                            let result = tr.run_tool(fc_clone.name.clone(), args).await;
-                            (fc_clone.call_id.clone(), result)
-                        });
 
                         function_calls.push(fc);
                     }
@@ -150,36 +140,93 @@ impl OpenAIResponsesHandler {
             }
         }
 
-        // Update previous_response_id for conversation continuity
         if let Some(id) = response_id {
             self.previous_response_id = Some(id);
         }
 
-        if !tool_join_set.is_empty() {
+        if !function_calls.is_empty() {
+            let exclusive_names = exclusive_tool_names(
+                tools_runner.as_ref(),
+                function_calls.iter().map(|call| call.name.as_str()),
+            );
             let mut input_items: Vec<InputItem> = Vec::new();
 
-            while let Some(result) = tool_join_set.join_next().await {
-                match result {
-                    Ok((call_id, value)) => {
-                        self.sender
-                            .send(HandlerToLooperMessage::ToolCallComplete(call_id.clone()))
-                            .await?;
+            if !exclusive_names.is_empty() && function_calls.len() > 1 {
+                let error_result = invalid_exclusive_tool_batch_result(&exclusive_names);
 
-                        input_items.push(InputItem::Item(Item::FunctionCallOutput(
-                            FunctionCallOutputItemParam {
-                                call_id,
-                                output: FunctionCallOutput::Text(value.to_string()),
-                                id: None,
-                                status: None,
-                            },
-                        )));
+                for fc in function_calls {
+                    self.sender
+                        .send(HandlerToLooperMessage::ToolCallComplete(
+                            fc.call_id.clone(),
+                        ))
+                        .await?;
+
+                    input_items.push(InputItem::Item(Item::FunctionCallOutput(
+                        FunctionCallOutputItemParam {
+                            call_id: fc.call_id,
+                            output: FunctionCallOutput::Text(error_result.to_string()),
+                            id: None,
+                            status: None,
+                        },
+                    )));
+                }
+            } else if !exclusive_names.is_empty() {
+                let fc = function_calls.into_iter().next().expect("function call missing");
+                let args: Value = serde_json::from_str(&fc.arguments).unwrap_or_default();
+                let result = tools_runner.run_tool(fc.name.clone(), args).await;
+
+                self.sender
+                    .send(HandlerToLooperMessage::ToolCallComplete(fc.call_id.clone()))
+                    .await?;
+
+                input_items.push(InputItem::Item(Item::FunctionCallOutput(
+                    FunctionCallOutputItemParam {
+                        call_id: fc.call_id,
+                        output: FunctionCallOutput::Text(result.to_string()),
+                        id: None,
+                        status: None,
+                    },
+                )));
+            } else {
+                let mut tool_join_set = JoinSet::new();
+                let mut ordered_results = Vec::new();
+                ordered_results.resize_with(function_calls.len(), || None);
+
+                for (index, fc) in function_calls.into_iter().enumerate() {
+                    let tr = tools_runner.clone();
+                    tool_join_set.spawn(async move {
+                        let args: Value = serde_json::from_str(&fc.arguments).unwrap_or_default();
+                        let result = tr.run_tool(fc.name.clone(), args).await;
+                        (index, fc.call_id.clone(), result)
+                    });
+                }
+
+                while let Some(result) = tool_join_set.join_next().await {
+                    match result {
+                        Ok((index, call_id, value)) => {
+                            self.sender
+                                .send(HandlerToLooperMessage::ToolCallComplete(call_id.clone()))
+                                .await?;
+                            ordered_results[index] = Some((call_id, value));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Join Error occured when collecting tool call results | Error: {}",
+                                e
+                            );
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Join Error occured when collecting tool call results | Error: {}",
-                            e
-                        );
-                    }
+                }
+
+                for (call_id, value) in ordered_results.into_iter().flatten() {
+                    input_items.push(InputItem::Item(Item::FunctionCallOutput(
+                        FunctionCallOutputItemParam {
+                            call_id,
+                            output: FunctionCallOutput::Text(value.to_string()),
+                            id: None,
+                            status: None,
+                        },
+                    )));
                 }
             }
 

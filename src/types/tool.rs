@@ -1,5 +1,12 @@
 use serde_json::{Value, json};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolExecutionMode {
+    #[default]
+    Parallel,
+    Exclusive,
+}
+
 #[derive(Debug, Clone)]
 pub struct LooperToolDefinition {
     pub name: String,

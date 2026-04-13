@@ -15,7 +15,7 @@ use anyhow::Result;
 use tokio::task::JoinSet;
 
 use crate::{
-    services::ChatHandler,
+    services::{ChatHandler, handlers::tool_policy::*},
     tools::LooperTools,
     types::{
         LooperToolDefinition, MessageHistory,
@@ -90,7 +90,6 @@ impl AnthropicNonStreamingHandler {
             }
         }
 
-        // Push assistant message to history
         if !assistant_content.is_empty() {
             self.messages.push(Message {
                 role: MessageRole::Assistant,
@@ -98,51 +97,102 @@ impl AnthropicNonStreamingHandler {
             });
         }
 
-        // Execute tool calls if any
         let mut tool_call_records = Vec::new();
 
         if !tool_uses.is_empty() {
-            let tr = tools_runner.clone();
-            let mut tool_join_set = JoinSet::new();
+            let exclusive_names =
+                exclusive_tool_names(tools_runner.as_ref(), tool_uses.iter().map(|tool| tool.name.as_str()));
 
-            for tool_use in tool_uses {
-                let tr = tr.clone();
-                tool_join_set.spawn(async move {
-                    let result = tr
-                        .run_tool(tool_use.name.clone(), tool_use.input.clone())
-                        .await;
+            if !exclusive_names.is_empty() && tool_uses.len() > 1 {
+                let error_result = invalid_exclusive_tool_batch_result(&exclusive_names);
 
-                    (result, tool_use)
+                for tool_use in tool_uses {
+                    tool_call_records.push(ToolCallRecord {
+                        id: tool_use.id.clone(),
+                        name: tool_use.name.clone(),
+                        args: tool_use.input.clone(),
+                        result: error_result.clone(),
+                    });
+
+                    self.messages.push(Message {
+                        role: MessageRole::User,
+                        content: MessageContentList(vec![MessageContent::ToolResult(
+                            ToolResultBuilder::default()
+                                .tool_use_id(&tool_use.id)
+                                .content(error_result.to_string())
+                                .build()?,
+                        )]),
+                    });
+                }
+            } else if !exclusive_names.is_empty() {
+                let tool_use = tool_uses.into_iter().next().expect("tool use missing");
+                let result = tools_runner
+                    .run_tool(tool_use.name.clone(), tool_use.input.clone())
+                    .await;
+
+                tool_call_records.push(ToolCallRecord {
+                    id: tool_use.id.clone(),
+                    name: tool_use.name.clone(),
+                    args: tool_use.input.clone(),
+                    result: result.clone(),
                 });
-            }
 
-            while let Some(result) = tool_join_set.join_next().await {
-                match result {
-                    Ok((result, tool_use)) => {
-                        tool_call_records.push(ToolCallRecord {
-                            id: tool_use.id.clone(),
-                            name: tool_use.name.clone(),
-                            args: tool_use.input.clone(),
-                            result: result.clone(),
-                        });
+                self.messages.push(Message {
+                    role: MessageRole::User,
+                    content: MessageContentList(vec![MessageContent::ToolResult(
+                        ToolResultBuilder::default()
+                            .tool_use_id(&tool_use.id)
+                            .content(result.to_string())
+                            .build()?,
+                    )]),
+                });
+            } else {
+                let mut tool_join_set = JoinSet::new();
+                let mut ordered_results = Vec::new();
+                ordered_results.resize_with(tool_uses.len(), || None);
 
-                        // Push tool result message to history
-                        self.messages.push(Message {
-                            role: MessageRole::User,
-                            content: MessageContentList(vec![MessageContent::ToolResult(
-                                ToolResultBuilder::default()
-                                    .tool_use_id(&tool_use.id)
-                                    .content(result.to_string())
-                                    .build()?,
-                            )]),
-                        });
+                for (index, tool_use) in tool_uses.into_iter().enumerate() {
+                    let tr = tools_runner.clone();
+                    tool_join_set.spawn(async move {
+                        let result = tr
+                            .run_tool(tool_use.name.clone(), tool_use.input.clone())
+                            .await;
+
+                        (index, result, tool_use)
+                    });
+                }
+
+                while let Some(result) = tool_join_set.join_next().await {
+                    match result {
+                        Ok((index, result, tool_use)) => {
+                            ordered_results[index] = Some((result, tool_use));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Join Error occured when collecting tool call results | Error: {}",
+                                e
+                            );
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Join Error occured when collecting tool call results | Error: {}",
-                            e
-                        );
-                    }
+                }
+
+                for (result, tool_use) in ordered_results.into_iter().flatten() {
+                    tool_call_records.push(ToolCallRecord {
+                        id: tool_use.id.clone(),
+                        name: tool_use.name.clone(),
+                        args: tool_use.input.clone(),
+                        result: result.clone(),
+                    });
+
+                    self.messages.push(Message {
+                        role: MessageRole::User,
+                        content: MessageContentList(vec![MessageContent::ToolResult(
+                            ToolResultBuilder::default()
+                                .tool_use_id(&tool_use.id)
+                                .content(result.to_string())
+                                .build()?,
+                        )]),
+                    });
                 }
             }
 
@@ -152,8 +202,7 @@ impl AnthropicNonStreamingHandler {
                 tool_calls: tool_call_records,
             });
 
-            // Recurse to handle follow-up
-            return self.inner_send_message(tr, steps).await;
+            return self.inner_send_message(tools_runner, steps).await;
         }
 
         steps.push(TurnStep {
