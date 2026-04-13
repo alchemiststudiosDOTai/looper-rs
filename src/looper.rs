@@ -13,8 +13,8 @@ use crate::{
             openai_responses_non_streaming::OpenAIResponsesNonStreamingHandler,
         },
     },
-    tools::{EmptyToolSet, LooperTools, SubAgentTool},
-    types::{Handlers, MessageHistory, turn::TurnResult},
+    tools::{AskUserTool, CompositeToolSet, LooperTools, SubAgentTool},
+    types::{AskUserSender, Handlers, MessageHistory, turn::TurnResult},
 };
 
 pub struct Looper {
@@ -29,6 +29,7 @@ pub struct LooperBuilder<'a> {
     tools: Option<Box<dyn LooperTools>>,
     instructions: Option<String>,
     sub_agent: Option<Looper>,
+    ask_user_channel: Option<AskUserSender>,
 }
 
 impl<'a> LooperBuilder<'a> {
@@ -57,8 +58,26 @@ impl<'a> LooperBuilder<'a> {
         self
     }
 
+    pub fn ask_user_channel(mut self, channel: AskUserSender) -> Self {
+        self.ask_user_channel = Some(channel);
+        self
+    }
+
     pub async fn build(mut self) -> Result<Looper> {
         let sub_agent_enabled = self.sub_agent.is_some();
+        let mut tool_set = CompositeToolSet::new(self.tools.take());
+
+        if let Some(sub_agent) = self.sub_agent.take() {
+            tool_set
+                .add_tool(Arc::new(SubAgentTool::new(sub_agent)))
+                .await;
+        }
+
+        if let Some(channel) = self.ask_user_channel.take() {
+            tool_set.add_tool(Arc::new(AskUserTool::new(channel))).await;
+        }
+
+        let tool_definitions = tool_set.get_tools().await;
 
         let handler: Box<dyn ChatHandler> = match self.handler_type {
             Handlers::Anthropic(m) => {
@@ -66,15 +85,7 @@ impl<'a> LooperBuilder<'a> {
                     m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::OpenAICompletions(m) => {
@@ -82,15 +93,7 @@ impl<'a> LooperBuilder<'a> {
                     m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::OpenAIResponses(m) => {
@@ -98,15 +101,7 @@ impl<'a> LooperBuilder<'a> {
                     m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
             Handlers::Gemini(m) => {
@@ -114,31 +109,16 @@ impl<'a> LooperBuilder<'a> {
                     m,
                     &get_system_message(self.instructions.as_deref(), sub_agent_enabled)?,
                 )?;
-
-                if let Some(t) = self.tools.as_mut() {
-                    if let Some(sa) = self.sub_agent {
-                        let agent_tools = Arc::new(SubAgentTool::new(sa));
-                        let _ = t.add_tool(agent_tools).await;
-                    }
-                    handler.set_tools(t.get_tools().await);
-                }
-
+                handler.set_tools(tool_definitions.clone());
                 Box::new(handler)
             }
         };
 
-        match self.tools {
-            Some(t) => Ok(Looper {
-                handler,
-                message_history: self.message_history,
-                tools: Arc::from(t),
-            }),
-            None => Ok(Looper {
-                handler,
-                message_history: self.message_history,
-                tools: Arc::new(EmptyToolSet),
-            }),
-        }
+        Ok(Looper {
+            handler,
+            message_history: self.message_history,
+            tools: Arc::new(tool_set),
+        })
     }
 }
 
@@ -150,6 +130,7 @@ impl Looper {
             tools: None,
             sub_agent: None,
             instructions: None,
+            ask_user_channel: None,
         }
     }
 
